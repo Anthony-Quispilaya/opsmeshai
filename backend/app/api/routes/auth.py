@@ -24,10 +24,11 @@ async def _deliver_welcome_intro_task(user_id: str) -> None:
             user = result.scalar_one_or_none()
             if not user:
                 return
-            sent, _ = await send_welcome_imessage(db, user, force=False)
+            sent, error_detail = await send_welcome_imessage(db, user, force=False)
             if sent:
                 await db.commit()
             else:
+                logger.warning("Welcome iMessage not sent for user %s: %s", user_id, error_detail)
                 await db.rollback()
         except Exception:
             logger.exception("Welcome intro task failed for user %s", user_id)

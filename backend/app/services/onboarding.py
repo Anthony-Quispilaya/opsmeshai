@@ -97,6 +97,7 @@ async def send_welcome_imessage(
         payload=bridge_response,
     )
     db.add(event)
+    await db.flush()
 
     user.welcome_message_sent_at = datetime.now(timezone.utc)
     db.add(user)

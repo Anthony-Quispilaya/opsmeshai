@@ -185,6 +185,11 @@ async def _store_inbound_message(
             run.error_code = exc.code
             run.error_message = str(exc)
             run.trace = {"error": str(exc), "code": exc.code}
+        except Exception as exc:  # bridge HTTPException or any unexpected error
+            run.status = "failed"
+            run.error_code = "send_error"
+            run.error_message = str(exc)
+            run.trace = {"error": str(exc), "code": "send_error"}
 
     await db.commit()
     return WebhookInboundResponse(

@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +10,8 @@ from backend.app.models.user import User
 from backend.app.schemas.user import UserPhoneUpdateRequest, UserResponse
 from backend.app.services.onboarding import send_welcome_imessage
 from backend.app.utils.phone import normalize_e164
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["users"])
 
@@ -40,10 +44,11 @@ async def update_preferred_phone(
 
     previous_norm = normalize_e164(previous) if previous else ""
     if normalized != previous_norm:
-        sent, _ = await send_welcome_imessage(db, current_user, force=True)
+        sent, error_detail = await send_welcome_imessage(db, current_user, force=True)
         if sent:
             await db.commit()
         else:
+            logger.warning("Welcome iMessage not sent for user %s after phone update: %s", current_user.id, error_detail)
             await db.rollback()
         await db.refresh(current_user)
     return current_user
