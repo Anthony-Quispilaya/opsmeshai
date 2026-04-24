@@ -1,0 +1,80 @@
+version: 1
+name: opsmesh-local-dev-ops
+description: Local runbook for account recovery, migrations, and DB GUI access.
+
+defaults:
+  repo_root: /home/anthony/OpenMeshAI/opsmesh-ai
+  postgres:
+    container: opsmesh-postgres
+    host: localhost
+    port: 5432
+    database: opsmesh
+    user: opsmesh
+    password: opsmesh
+
+run_commands:
+  start_postgres: "cd /home/anthony/OpenMeshAI/opsmesh-ai && docker compose up -d postgres"
+  migrate_db: "cd /home/anthony/OpenMeshAI/opsmesh-ai && .venv/bin/alembic -c db/alembic.ini upgrade head"
+  start_backend: "cd /home/anthony/OpenMeshAI/opsmesh-ai && .venv/bin/uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000"
+  start_frontend: "cd /home/anthony/OpenMeshAI/opsmesh-ai && npm run dev"
+  start_photon_bridge_with_env: "cd /home/anthony/OpenMeshAI/opsmesh-ai && set -a && source .env && set +a && npm run photon:bridge"
+  test_photon_bridge_health: "curl -i http://127.0.0.1:8787/health"
+
+account_recovery:
+  list_users:
+    command: >-
+      cd /home/anthony/OpenMeshAI/opsmesh-ai &&
+      docker exec -it opsmesh-postgres psql -U opsmesh -d opsmesh -c
+      "SELECT email, preferred_phone_number, created_at FROM users ORDER BY created_at DESC;"
+  lookup_by_phone:
+    command_template: >-
+      cd /home/anthony/OpenMeshAI/opsmesh-ai &&
+      docker exec -it opsmesh-postgres psql -U opsmesh -d opsmesh -c
+      "SELECT email, preferred_phone_number FROM users WHERE preferred_phone_number = '<E164_PHONE>';"
+    example_phone: "+15551234567"
+  reset_password:
+    command_template: |
+      cd /home/anthony/OpenMeshAI/opsmesh-ai
+      .venv/bin/python - <<'PY'
+      from backend.app.core.security import hash_password
+      from sqlalchemy import create_engine, text
+      from backend.app.core.config import get_settings
+
+      email = "<EMAIL>"
+      new_password = "<NEW_PASSWORD>"
+
+      url = get_settings().database_url.replace("+asyncpg", "+psycopg")
+      engine = create_engine(url)
+      with engine.begin() as conn:
+          conn.execute(
+              text("UPDATE users SET password_hash=:ph WHERE email=:email"),
+              {"ph": hash_password(new_password), "email": email.lower()},
+          )
+      print("Password updated for", email)
+      PY
+
+db_gui:
+  adminer:
+    start_command: "docker run --name opsmesh-adminer --rm -p 8081:8080 adminer"
+    url: "http://localhost:8081"
+    login:
+      system: PostgreSQL
+      server: opsmesh-postgres
+      username: opsmesh
+      password: opsmesh
+      database: opsmesh
+  desktop_clients:
+    supported:
+      - DBeaver
+      - pgAdmin
+      - TablePlus
+    connection:
+      host: localhost
+      port: 5432
+      database: opsmesh
+      username: opsmesh
+      password: opsmesh
+
+notes:
+  - Always use .venv/bin/alembic (system alembic may load SQLAlchemy 1.x and fail).
+  - preferred_phone_number is unique per user.

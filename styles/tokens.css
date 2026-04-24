@@ -1,0 +1,42 @@
+/**
+ * Design tokens — single source for semantic color, radius, elevation.
+ * Feature code should use Tailwind theme keys (canvas, surface, accent, …), not raw channel values here.
+ */
+:root {
+  /* RGB triplets for Tailwind alpha syntax: rgb(var(--x) / <alpha-value>) */
+  --color-canvas: 8 10 16;
+  --color-surface: 18 21 32;
+  --color-surface-elevated: 28 32 48;
+  --color-border: 255 255 255;
+  --color-border-subtle: 255 255 255;
+  --color-foreground: 248 250 252;
+  --color-muted: 148 163 184;
+  --color-accent: 59 130 246;
+  --color-accent-foreground: 239 246 255;
+  --color-danger: 248 113 113;
+  --color-success: 52 211 153;
+
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+
+  --shadow-glass: 0 8px 32px rgb(0 0 0 / 0.35);
+  --shadow-focus: 0 0 0 3px rgb(59 130 246 / 0.35);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --color-canvas: 244 246 251;
+    --color-surface: 255 255 255;
+    --color-surface-elevated: 255 255 255;
+    --color-border: 15 23 42;
+    --color-border-subtle: 15 23 42;
+    --color-foreground: 15 23 42;
+    --color-muted: 100 116 139;
+    --color-accent: 37 99 235;
+    --color-accent-foreground: 255 255 255;
+    --shadow-glass: 0 8px 32px rgb(15 23 42 / 0.08);
+    --shadow-focus: 0 0 0 3px rgb(37 99 235 / 0.25);
+  }
+}

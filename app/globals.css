@@ -1,0 +1,19 @@
+@import "../styles/tokens.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply antialiased;
+  }
+
+  body {
+    @apply min-h-[100dvh] bg-canvas text-foreground font-sans text-[15px] leading-relaxed;
+  }
+
+  :focus-visible {
+    @apply outline-none shadow-focus rounded-sm;
+  }
+}
