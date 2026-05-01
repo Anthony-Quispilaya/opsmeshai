@@ -1,28 +1,40 @@
 import asyncio
 from collections import Counter
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.llm import LLMResponder
 from backend.app.api.deps import get_current_user
 from backend.app.db.session import get_db
+from backend.app.models.agent_action import AgentAction
 from backend.app.models.audit_log import AuditLog
+from backend.app.models.automation_rule import AutomationRule
 from backend.app.models.compliance_record import ComplianceRecord
 from backend.app.models.support_ticket import SupportTicket
 from backend.app.models.transaction import Transaction
 from backend.app.models.user import User
 from backend.app.schemas.ops import (
+    AgentActionResponse,
     AuditLogResponse,
+    AutomationRunResponse,
+    AutomationRuleResponse,
+    DailyBriefingResponse,
     ComplianceRecordResponse,
     InsightsResponse,
+    RejectAgentActionRequest,
     SupportTicketResponse,
     TransactionResponse,
 )
+from backend.app.services.agent_actions import AgentActionService
+from backend.app.services.automation_rules import AutomationRuleService
 
 router = APIRouter(prefix="/ops", tags=["ops"])
 _llm = LLMResponder()
+_actions = AgentActionService()
+_automation = AutomationRuleService()
 
 
 @router.get("/transactions", response_model=list[TransactionResponse])
@@ -79,6 +91,152 @@ async def list_audit_logs(
         q = q.where(AuditLog.domain == domain)
     result = await db.execute(q)
     return result.scalars().all()  # type: ignore[return-value]
+
+
+@router.get("/agent-actions", response_model=list[AgentActionResponse])
+async def list_agent_actions(
+    limit: int = Query(default=25, le=100),
+    status: str | None = Query(default="pending"),
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> list[AgentActionResponse]:
+    q = select(AgentAction).order_by(desc(AgentAction.created_at)).limit(limit)
+    if status:
+        q = q.where(AgentAction.status == status)
+    result = await db.execute(q)
+    return result.scalars().all()  # type: ignore[return-value]
+
+
+@router.post("/agent-actions/generate", response_model=list[AgentActionResponse])
+async def generate_agent_actions(
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> list[AgentActionResponse]:
+    actions = await _actions.generate_recommendations(db)
+    await db.commit()
+    return actions  # type: ignore[return-value]
+
+
+@router.post("/agent-actions/{action_id}/approve", response_model=AgentActionResponse)
+async def approve_agent_action(
+    action_id: str,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> AgentActionResponse:
+    action = await db.get(AgentAction, action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail="Agent action not found")
+    action = await _actions.approve(db, action)
+    await db.commit()
+    await db.refresh(action)
+    return action  # type: ignore[return-value]
+
+
+@router.post("/agent-actions/{action_id}/reject", response_model=AgentActionResponse)
+async def reject_agent_action(
+    action_id: str,
+    payload: RejectAgentActionRequest,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> AgentActionResponse:
+    action = await db.get(AgentAction, action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail="Agent action not found")
+    action = await _actions.reject(db, action, payload.reason)
+    await db.commit()
+    await db.refresh(action)
+    return action  # type: ignore[return-value]
+
+
+@router.get("/automation-rules", response_model=list[AutomationRuleResponse])
+async def list_automation_rules(
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> list[AutomationRuleResponse]:
+    result = await db.execute(select(AutomationRule).order_by(AutomationRule.created_at))
+    return result.scalars().all()  # type: ignore[return-value]
+
+
+@router.post("/automation-rules/seed", response_model=list[AutomationRuleResponse])
+async def seed_automation_rules(
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> list[AutomationRuleResponse]:
+    rules = await _automation.seed_defaults(db)
+    await db.commit()
+    return rules  # type: ignore[return-value]
+
+
+@router.post("/automation-rules/run", response_model=AutomationRunResponse)
+async def run_automation_rules(
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> AutomationRunResponse:
+    result = await _automation.run_enabled(db)
+    await db.commit()
+    return AutomationRunResponse(**result)
+
+
+@router.get("/daily-briefing", response_model=DailyBriefingResponse)
+async def get_daily_briefing(
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> DailyBriefingResponse:
+    flagged_count = int(
+        await db.scalar(select(func.count(Transaction.id)).where(Transaction.flagged.is_(True))) or 0
+    )
+    high_risk_count = int(
+        await db.scalar(select(func.count(Transaction.id)).where(Transaction.risk_score >= 71)) or 0
+    )
+    open_tickets = int(
+        await db.scalar(select(func.count(SupportTicket.id)).where(SupportTicket.status == "open")) or 0
+    )
+    pending_compliance = int(
+        await db.scalar(select(func.count(ComplianceRecord.id)).where(ComplianceRecord.status == "pending")) or 0
+    )
+    pending_actions = list(
+        (
+            await db.execute(
+                select(AgentAction)
+                .where(AgentAction.status == "pending")
+                .order_by(desc(AgentAction.priority), desc(AgentAction.created_at))
+                .limit(3)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    highlights = [
+        f"{flagged_count} flagged transactions, including {high_risk_count} high-risk items.",
+        f"{open_tickets} open support tickets need queue coverage.",
+        f"{pending_compliance} compliance records are pending review.",
+    ]
+    recommended_actions = [action.title for action in pending_actions]
+    if not recommended_actions:
+        recommended_actions = ["Run automation rules to generate approval-ready next steps."]
+
+    summary = (
+        f"Today: {flagged_count} flagged transactions, {open_tickets} open tickets, "
+        f"and {pending_compliance} pending compliance records."
+    )
+    if _llm.enabled:
+        prompt = (
+            "Create a crisp executive operations briefing in one sentence. "
+            "Use only these facts:\n"
+            + "\n".join(highlights + [f"Next actions: {', '.join(recommended_actions)}"])
+        )
+        try:
+            summary = await asyncio.to_thread(_llm.generate_reply, prompt)
+        except Exception:  # noqa: BLE001
+            pass
+
+    return DailyBriefingResponse(
+        generated_at=datetime.now(timezone.utc),
+        summary=summary,
+        highlights=highlights,
+        recommended_actions=recommended_actions,
+    )
 
 
 @router.get("/insights", response_model=InsightsResponse)

@@ -35,10 +35,24 @@ type AuditLog = {
   id: string; event_type: string; domain: string;
   action_taken: string; source: string; created_at: string;
 };
+type AgentAction = {
+  id: string; title: string; description: string; domain: string;
+  action_type: string; entity_type: string; entity_id: string | null;
+  status: string; priority: string; confidence: number; rationale: string | null;
+  created_at: string; resolved_at: string | null;
+};
+type AutomationRule = {
+  id: string; name: string; description: string; domain: string;
+  trigger_type: string; conditions: Record<string, unknown>;
+  action_type: string; enabled: boolean; created_at: string; last_run_at: string | null;
+};
 type Insights = {
   summary: string; flagged_transactions: number; open_tickets: number;
   pending_compliance: number; highest_risk_amount: number | null;
   highest_risk_merchant: string | null; top_ticket_category: string | null;
+};
+type DailyBriefing = {
+  generated_at: string; summary: string; highlights: string[]; recommended_actions: string[];
 };
 
 // ─── Filter state types ───────────────────────────────────────────────────────
@@ -46,6 +60,7 @@ type Insights = {
 type TxFilters    = { flagged: "all"|"yes"|"no"; risk: "all"|"low"|"medium"|"high"; category: string; source: string };
 type TkFilters    = { status: "all"|"open"|"in_review"|"resolved"; priority: "all"|"high"|"medium"|"low"; category: string };
 type CrFilters    = { status: "all"|"pending"|"approved"|"rejected"; severity: "all"|"high"|"medium"|"low"; policy_flag: "all"|"yes"|"no" };
+type OpsTab = "transactions"|"support"|"compliance";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -108,6 +123,42 @@ function ActiveCount({ shown, total }: { shown: number; total: number }) {
   return <span className="text-xs text-muted">{shown} of {total} records</span>;
 }
 
+const agentExamples: Record<OpsTab, { label: string; examples: string[] }> = {
+  transactions: {
+    label: "Transaction commands",
+    examples: [
+      "Are you active?",
+      "Show me high-risk transactions",
+      "Spent 120 at Amazon in NJ",
+      "Why was the Apple Store transaction flagged?",
+      "Update the Amazon transaction category to electronics",
+      "Delete the Walmart transaction",
+    ],
+  },
+  support: {
+    label: "Support ticket commands",
+    examples: [
+      "What open support tickets need attention?",
+      "Create a support ticket: Maria cannot log in after password reset",
+      "Mark the Maria login ticket as resolved",
+      "Escalate the duplicate charge ticket to high priority",
+      "List payment failure tickets",
+      "Delete the refund delay ticket",
+    ],
+  },
+  compliance: {
+    label: "Compliance commands",
+    examples: [
+      "What pending compliance records do we have?",
+      "Add a compliance note for missing receipt on reimbursement",
+      "Approve the compliance record about missing receipt",
+      "Reject the premium seat reimbursement record",
+      "List policy-flagged compliance items",
+      "Run a risk analysis across compliance and tickets",
+    ],
+  },
+};
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function HomePage() {
@@ -120,12 +171,17 @@ export default function HomePage() {
   const [tickets, setTickets]     = useState<SupportTicket[]>([]);
   const [compliance, setCompliance] = useState<ComplianceRecord[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [agentActions, setAgentActions] = useState<AgentAction[]>([]);
+  const [automationRules, setAutomationRules] = useState<AutomationRule[]>([]);
   const [insights, setInsights]   = useState<Insights | null>(null);
+  const [dailyBriefing, setDailyBriefing] = useState<DailyBriefing | null>(null);
 
   // UI
-  const [activeTab, setTab] = useState<"transactions"|"support"|"compliance">("transactions");
+  const [activeTab, setTab] = useState<OpsTab>("transactions");
   const [error, setError]   = useState<string | null>(null);
   const [welcomeLoading, setWelcomeLoading] = useState(false);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [automationLoading, setAutomationLoading] = useState<string | null>(null);
 
   // Filters — transactions
   const [txF, setTxF] = useState<TxFilters>({ flagged: "all", risk: "all", category: "all", source: "all" });
@@ -140,13 +196,16 @@ export default function HomePage() {
     setError(null);
     const h = { ...authHeaders(token), "Content-Type": "application/json" } as HeadersInit;
 
-    const [meRes, sumRes, txRes, tkRes, cpRes, logRes, insRes] = await Promise.all([
+    const [meRes, sumRes, txRes, tkRes, cpRes, logRes, actRes, ruleRes, briefRes, insRes] = await Promise.all([
       fetch(`${apiUrl}/api/v1/me`, { headers: h }),
       fetch(`${apiUrl}/api/v1/dashboard/summary`, { headers: h }),
       fetch(`${apiUrl}/api/v1/ops/transactions?limit=200`, { headers: h }),
       fetch(`${apiUrl}/api/v1/ops/support-tickets?limit=200`, { headers: h }),
       fetch(`${apiUrl}/api/v1/ops/compliance?limit=200`, { headers: h }),
       fetch(`${apiUrl}/api/v1/ops/audit-logs?limit=15`, { headers: h }),
+      fetch(`${apiUrl}/api/v1/ops/agent-actions?limit=8&status=pending`, { headers: h }),
+      fetch(`${apiUrl}/api/v1/ops/automation-rules`, { headers: h }),
+      fetch(`${apiUrl}/api/v1/ops/daily-briefing`, { headers: h }),
       fetch(`${apiUrl}/api/v1/ops/insights`, { headers: h }),
     ]);
 
@@ -157,6 +216,9 @@ export default function HomePage() {
     if (tkRes.ok)  setTickets((await tkRes.json()) as SupportTicket[]);
     if (cpRes.ok)  setCompliance((await cpRes.json()) as ComplianceRecord[]);
     if (logRes.ok) setAuditLogs((await logRes.json()) as AuditLog[]);
+    if (actRes.ok) setAgentActions((await actRes.json()) as AgentAction[]);
+    if (ruleRes.ok) setAutomationRules((await ruleRes.json()) as AutomationRule[]);
+    if (briefRes.ok) setDailyBriefing((await briefRes.json()) as DailyBriefing);
     if (insRes.ok) setInsights((await insRes.json()) as Insights);
   }, [apiUrl]);
 
@@ -197,6 +259,7 @@ export default function HomePage() {
   // ── Helpers ──────────────────────────────────────────────────────────────────
 
   const introSent = Boolean(me?.welcome_message_sent_at);
+  const currentAgentExamples = agentExamples[activeTab];
 
   const resetTxF = () => setTxF({ flagged: "all", risk: "all", category: "all", source: "all" });
   const resetTkF = () => setTkF({ status: "all", priority: "all", category: "all" });
@@ -220,6 +283,63 @@ export default function HomePage() {
       if (body.sent === false) { setError(body.error_detail || "Photon did not confirm delivery."); return; }
       await load();
     } finally { setWelcomeLoading(false); }
+  }
+
+  async function generateActions() {
+    const token = getStoredToken();
+    if (!token) return;
+    setActionLoading("generate"); setError(null);
+    try {
+      const res = await fetch(`${apiUrl}/api/v1/ops/agent-actions/generate`, {
+        method: "POST",
+        headers: { ...authHeaders(token), "Content-Type": "application/json" } as HeadersInit,
+      });
+      if (!res.ok) { setError("Could not generate agent actions."); return; }
+      await load();
+    } finally { setActionLoading(null); }
+  }
+
+  async function resolveAction(id: string, decision: "approve" | "reject") {
+    const token = getStoredToken();
+    if (!token) return;
+    setActionLoading(id); setError(null);
+    try {
+      const res = await fetch(`${apiUrl}/api/v1/ops/agent-actions/${id}/${decision}`, {
+        method: "POST",
+        headers: { ...authHeaders(token), "Content-Type": "application/json" } as HeadersInit,
+        body: decision === "reject" ? JSON.stringify({ reason: "Rejected from dashboard" }) : undefined,
+      });
+      if (!res.ok) { setError(`Could not ${decision} action.`); return; }
+      await load();
+    } finally { setActionLoading(null); }
+  }
+
+  async function seedAutomationRules() {
+    const token = getStoredToken();
+    if (!token) return;
+    setAutomationLoading("seed"); setError(null);
+    try {
+      const res = await fetch(`${apiUrl}/api/v1/ops/automation-rules/seed`, {
+        method: "POST",
+        headers: { ...authHeaders(token), "Content-Type": "application/json" } as HeadersInit,
+      });
+      if (!res.ok) { setError("Could not create automation rules."); return; }
+      await load();
+    } finally { setAutomationLoading(null); }
+  }
+
+  async function runAutomationRules() {
+    const token = getStoredToken();
+    if (!token) return;
+    setAutomationLoading("run"); setError(null);
+    try {
+      const res = await fetch(`${apiUrl}/api/v1/ops/automation-rules/run`, {
+        method: "POST",
+        headers: { ...authHeaders(token), "Content-Type": "application/json" } as HeadersInit,
+      });
+      if (!res.ok) { setError("Could not run automation rules."); return; }
+      await load();
+    } finally { setAutomationLoading(null); }
   }
 
   return (
@@ -262,6 +382,33 @@ export default function HomePage() {
               )}
             </p>
           )}
+        </Card>
+      )}
+
+      {/* ── Daily briefing ── */}
+      {dailyBriefing && (
+        <Card className="p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="mb-2 text-xs uppercase tracking-wide text-muted">Daily Briefing</p>
+              <p className="text-sm leading-relaxed">{dailyBriefing.summary}</p>
+            </div>
+            <Badge tone="neutral">{fmt(dailyBriefing.generated_at)}</Badge>
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <div>
+              <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">Signals</p>
+              <ul className="space-y-1.5 text-sm text-muted">
+                {dailyBriefing.highlights.map(item => <li key={item}>{item}</li>)}
+              </ul>
+            </div>
+            <div>
+              <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted">Next Actions</p>
+              <ul className="space-y-1.5 text-sm text-muted">
+                {dailyBriefing.recommended_actions.map(item => <li key={item}>{item}</li>)}
+              </ul>
+            </div>
+          </div>
         </Card>
       )}
 
@@ -551,6 +698,115 @@ export default function HomePage() {
         )}
       </div>
 
+      {/* ── Automation rules ── */}
+      <Card>
+        <CardHeader>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <CardTitle>Automation Rules</CardTitle>
+              <CardDescription>Reusable scans that turn operational signals into approval-ready actions</CardDescription>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => void seedAutomationRules()}
+                disabled={automationLoading === "seed"}
+              >
+                {automationLoading === "seed" ? "Creating..." : "Create defaults"}
+              </Button>
+              <Button
+                type="button"
+                onClick={() => void runAutomationRules()}
+                disabled={automationLoading === "run"}
+              >
+                {automationLoading === "run" ? "Running..." : "Run rules"}
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+        <div className="grid gap-3 px-6 pb-6 lg:grid-cols-3">
+          {automationRules.length === 0 && (
+            <div className="rounded-md border border-border/10 bg-surface-elevated/35 px-4 py-5 text-sm text-muted lg:col-span-3">
+              No automation rules yet. Create defaults to start scanning transactions, tickets, and compliance.
+            </div>
+          )}
+          {automationRules.map(rule => (
+            <div key={rule.id} className="rounded-md border border-border/10 bg-surface-elevated/35 p-4">
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <Badge tone={rule.enabled ? "accent" : "neutral"}>{rule.enabled ? "enabled" : "off"}</Badge>
+                <Badge tone="neutral">{fmtCat(rule.domain)}</Badge>
+              </div>
+              <h3 className="text-sm font-semibold">{rule.name}</h3>
+              <p className="mt-2 text-sm text-muted">{rule.description}</p>
+              <p className="mt-3 text-xs text-muted">
+                Last run: {rule.last_run_at ? fmt(rule.last_run_at) : "Never"}
+              </p>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {/* ── Agent action inbox ── */}
+      <Card>
+        <CardHeader>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <CardTitle>Agent Action Inbox</CardTitle>
+              <CardDescription>AI-recommended workflow actions awaiting human approval</CardDescription>
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => void generateActions()}
+              disabled={actionLoading === "generate"}
+            >
+              {actionLoading === "generate" ? "Scanning..." : "Generate actions"}
+            </Button>
+          </div>
+        </CardHeader>
+        <div className="grid gap-3 px-6 pb-6 lg:grid-cols-3">
+          {agentActions.length === 0 && (
+            <div className="rounded-md border border-border/10 bg-surface-elevated/35 px-4 py-5 text-sm text-muted lg:col-span-3">
+              No pending agent actions. Generate actions to scan current risk, support, and compliance queues.
+            </div>
+          )}
+          {agentActions.map(action => (
+            <div key={action.id} className="flex min-h-52 flex-col rounded-md border border-border/10 bg-surface-elevated/35 p-4">
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <Badge tone={action.priority === "high" ? "danger" : "neutral"}>{action.priority}</Badge>
+                <Badge tone="accent">{fmtCat(action.domain)}</Badge>
+                <span className="ml-auto text-xs text-muted">{Math.round(action.confidence * 100)}%</span>
+              </div>
+              <h3 className="text-sm font-semibold">{action.title}</h3>
+              <p className="mt-2 line-clamp-3 text-sm text-muted">{action.description}</p>
+              {action.rationale && (
+                <p className="mt-3 text-xs text-muted">Why: {action.rationale}</p>
+              )}
+              <div className="mt-auto flex gap-2 pt-4">
+                <Button
+                  type="button"
+                  className="flex-1"
+                  onClick={() => void resolveAction(action.id, "approve")}
+                  disabled={actionLoading === action.id}
+                >
+                  Approve
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="flex-1"
+                  onClick={() => void resolveAction(action.id, "reject")}
+                  disabled={actionLoading === action.id}
+                >
+                  Reject
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
       {/* ── Bottom row ── */}
       <div className="grid gap-4 lg:grid-cols-2">
         {/* Recent activity */}
@@ -591,16 +847,12 @@ export default function HomePage() {
             </CardDescription>
           </CardHeader>
           <div className="px-6 pb-6">
-            <p className="mb-3 text-xs font-medium uppercase tracking-wide text-muted">Try these commands</p>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted">Try these commands</p>
+              <Badge tone="neutral">{currentAgentExamples.label}</Badge>
+            </div>
             <ul className="space-y-1.5">
-              {[
-                "Spent 120 at Amazon in NJ",
-                "Mark the Maria login ticket as resolved",
-                "Approve the compliance record about missing receipt",
-                "Delete the Walmart transaction",
-                "Update the Amazon transaction category to electronics",
-                "Check fraud activity",
-              ].map(cmd => (
+              {currentAgentExamples.examples.map(cmd => (
                 <li key={cmd} className="rounded bg-surface-elevated/60 px-3 py-1.5 font-mono text-xs text-muted">
                   {cmd}
                 </li>

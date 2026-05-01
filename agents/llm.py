@@ -24,6 +24,7 @@ class LLMResponder:
         self,
         user_message: str,
         history: list[dict] | None = None,
+        system_prompt: str | None = None,
     ) -> str:
         if not self.enabled:
             raise RuntimeError("OPENAI_API_KEY is not configured.")
@@ -34,11 +35,17 @@ class LLMResponder:
             {
                 "role": "system",
                 "content": (
-                    "You are OpsMesh AI, an intelligent operations assistant. "
-                    "You help teams manage transactions, support tickets, and compliance records. "
-                    "Be concise, specific, and action-oriented. "
-                    "When the user refers to 'it', 'that', 'the last one', or uses pronouns, "
-                    "resolve them from the conversation history."
+                    system_prompt
+                    or (
+                        "You are OpsMesh AI, an intelligent operations assistant. "
+                        "You help teams manage transactions, support tickets, and compliance records. "
+                        "You are often replying over SMS/iMessage, so keep responses brief: "
+                        "1-2 short sentences by default, or at most 3 bullets when listing options. "
+                        "Be natural, specific, and action-oriented. "
+                        "Only give longer detail if the user asks for details, a list, or an explanation. "
+                        "When the user refers to 'it', 'that', 'the last one', or uses pronouns, "
+                        "resolve them from the conversation history."
+                    )
                 ),
             }
         ]

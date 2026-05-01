@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "photon:bridge": "node messaging/photon-bridge/index.mjs"
+    "photon:bridge": "node messaging/photon-bridge/index.mjs",
+    "mcp:playwright": "playwright-mcp --headless --port 8931"
   },
   "dependencies": {
     "clsx": "^2.1.1",
@@ -19,6 +20,7 @@
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.1",
+    "@playwright/mcp": "^0.0.72",
     "@types/node": "^22.14.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",

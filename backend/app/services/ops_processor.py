@@ -5,14 +5,16 @@ import json
 import re
 from uuid import uuid4
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.llm import LLMResponder
+from backend.app.models.agent_action import AgentAction
 from backend.app.models.audit_log import AuditLog
 from backend.app.models.compliance_record import ComplianceRecord
 from backend.app.models.support_ticket import SupportTicket
 from backend.app.models.transaction import Transaction
+from backend.app.services.agent_actions import AgentActionService
 
 # ── LLM intent-parsing prompt ─────────────────────────────────────────────────
 
@@ -55,6 +57,7 @@ Return exactly: {"intent": "INTENT_NAME", "data": {...}}"""
 class OpsProcessor:
     def __init__(self) -> None:
         self.llm = LLMResponder()
+        self.agent_actions = AgentActionService()
 
     # ── Public entry point ────────────────────────────────────────────────────
 
@@ -64,11 +67,15 @@ class OpsProcessor:
         db: AsyncSession,
         history: list[dict] | None = None,
     ) -> str | None:
+        action_reply = await self._handle_agent_action_command(text, db)
+        if action_reply is not None:
+            return action_reply
+
         parsed = await asyncio.to_thread(self._parse_intent, text, history)
         intent: str = parsed.get("intent", "UNKNOWN")
         data: dict = parsed.get("data", {})
 
-        if intent == "UNKNOWN":
+        if intent in {"UNKNOWN", "CHAT"}:
             return None
 
         try:
@@ -79,11 +86,7 @@ class OpsProcessor:
     # ── Intent parsing via LLM (with keyword fallback) ────────────────────────
 
     def _parse_intent(self, text: str, history: list[dict] | None) -> dict:
-        # Fast-path: clearly conversational — skip LLM entirely
         t = text.lower().strip()
-        conversational = {"hello", "hi", "hey", "thanks", "thank you", "ok", "okay", "yes", "no", "bye"}
-        if t in conversational or (len(t.split()) <= 2 and not re.search(r"\d", t)):
-            return {"intent": "UNKNOWN", "data": {}}
 
         if self.llm.enabled:
             context = ""
@@ -97,7 +100,7 @@ class OpsProcessor:
                 "Return JSON only — no explanation, no markdown."
             )
             try:
-                raw = self.llm.generate_reply(prompt, [{"role": "system", "content": _PARSE_SYSTEM}])
+                raw = self.llm.generate_reply(prompt, system_prompt=_PARSE_SYSTEM)
                 m = re.search(r"\{.*\}", raw, re.DOTALL)
                 if m:
                     return json.loads(m.group())
@@ -108,7 +111,11 @@ class OpsProcessor:
         return self._keyword_classify(t)
 
     def _keyword_classify(self, t: str) -> dict:
+        t = t.lower().strip()
         has_num = bool(re.search(r"\d", t))
+
+        if self._is_conversational_or_meta(t):
+            return {"intent": "UNKNOWN", "data": {}}
 
         # DELETE
         del_kws = ["delete ", "remove ", "erase ", "get rid of", "drop ", "wipe ", "cancel "]
@@ -147,6 +154,18 @@ class OpsProcessor:
             temporal = any(w in t for w in ("recent", "latest", "last", "newest"))
             return {"intent": "EXPLAIN_TRANSACTION", "data": {"temporal": temporal}}
 
+        # QUERY
+        query_kws = ["show me", "how many", "what is the", "list ", "tell me about", "what are",
+                     "any open", "any pending", "flagged transaction", "open ticket",
+                     "pending compliance", "biggest transaction", "highest risk", "most common"]
+        domain_words = (
+            "transaction", "spending", "merchant", "amount", "flagged", "risk",
+            "ticket", "support", "issue", "customer", "refund", "login",
+            "compliance", "policy", "audit", "approval", "pending",
+        )
+        if any(k in t for k in query_kws) or (t.rstrip().endswith("?") and any(w in t for w in domain_words)):
+            return {"intent": "QUERY_DATA", "data": {}}
+
         # ADD_TRANSACTION
         spend_kws = ["spent ", "i paid", " paid ", "bought ", "purchased ", "add transaction",
                      "add merchant", "as merchant", "as the merchant", "merchant is",
@@ -179,13 +198,6 @@ class OpsProcessor:
                         "run analysis", "anomal"]
         if any(k in t for k in analysis_kws):
             return {"intent": "RUN_ANALYSIS", "data": {}}
-
-        # QUERY
-        query_kws = ["show me", "how many", "what is the", "list ", "tell me about", "what are",
-                     "any open", "any pending", "flagged transaction", "open ticket",
-                     "pending compliance", "biggest transaction", "highest risk", "most common"]
-        if any(k in t for k in query_kws) or t.rstrip().endswith("?"):
-            return {"intent": "QUERY_DATA", "data": {}}
 
         return {"intent": "UNKNOWN", "data": {}}
 
@@ -228,6 +240,91 @@ class OpsProcessor:
         if intent == "RUN_ANALYSIS":
             return await self._analysis(text, db, history)
         return None
+
+    # ── Agent action approvals ───────────────────────────────────────────────
+
+    async def _handle_agent_action_command(self, text: str, db: AsyncSession) -> str | None:
+        t = text.lower().strip()
+        mentions_action = any(
+            phrase in t
+            for phrase in (
+                "agent action",
+                "agent actions",
+                "approval",
+                "approvals",
+                "recommendation",
+                "recommendations",
+                "pending action",
+                "pending actions",
+                "next action",
+                "latest action",
+            )
+        )
+        if not mentions_action:
+            return None
+
+        if any(word in t for word in ("generate", "scan", "recommend", "suggest", "create")):
+            created = await self.agent_actions.generate_recommendations(db)
+            if not created:
+                pending = await self._pending_agent_actions(db, limit=3)
+                if not pending:
+                    return "No new approval actions right now."
+                return "No new actions. Pending: " + self._format_agent_actions(pending)
+            return f"Created {len(created)} approval actions. " + self._format_agent_actions(created[:3])
+
+        if any(word in t for word in ("show", "list", "what", "pending", "open", "need")):
+            pending = await self._pending_agent_actions(db, limit=3)
+            if not pending:
+                return "No pending approval actions right now."
+            return "Pending approvals: " + self._format_agent_actions(pending)
+
+        if any(word in t for word in ("approve", "yes", "confirm", "do it")):
+            action = await self._latest_pending_agent_action(db)
+            if action is None:
+                return "No pending agent action to approve."
+            await self.agent_actions.approve(db, action)
+            return f"Approved: {action.title}."
+
+        if any(word in t for word in ("reject", "no", "cancel", "skip", "deny")):
+            action = await self._latest_pending_agent_action(db)
+            if action is None:
+                return "No pending agent action to reject."
+            await self.agent_actions.reject(db, action, reason="Rejected from SMS")
+            return f"Rejected: {action.title}."
+
+        return None
+
+    async def _pending_agent_actions(self, db: AsyncSession, limit: int = 3) -> list[AgentAction]:
+        return list(
+            (
+                await db.execute(
+                    select(AgentAction)
+                    .where(AgentAction.status == "pending")
+                    .order_by(desc(AgentAction.created_at))
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    async def _latest_pending_agent_action(self, db: AsyncSession) -> AgentAction | None:
+        return await db.scalar(
+            select(AgentAction)
+            .where(AgentAction.status == "pending")
+            .order_by(desc(AgentAction.created_at))
+            .limit(1)
+        )
+
+    @staticmethod
+    def _format_agent_actions(actions: list[AgentAction]) -> str:
+        pieces = [
+            f"{idx + 1}. {action.title} ({action.priority}, {round(action.confidence * 100)}%)"
+            for idx, action in enumerate(actions)
+        ]
+        return " ".join(pieces)
+
+    # ── Conversational replies ───────────────────────────────────────────────
 
     # ── ADD ───────────────────────────────────────────────────────────────────
 
@@ -545,7 +642,7 @@ class OpsProcessor:
         if self.llm.enabled:
             prompt = (
                 "Explain clearly why this transaction was flagged (or not). "
-                "Cite specific risk signals. Be direct and concise (2-3 sentences).\n\n"
+                "Cite the strongest signal only. Keep it to 1-2 short SMS-friendly sentences.\n\n"
                 f"{context}\n\nUser: {text}\n\nAnswer:"
             )
             try:
@@ -644,7 +741,8 @@ class OpsProcessor:
         if self.llm.enabled:
             prompt = (
                 "You are an ops assistant. Answer using only the data below. "
-                "Present every listed item — do not omit any. Formatted for SMS.\n\n"
+                "Keep the reply SMS-friendly: 1-2 short sentences by default. "
+                "If the user explicitly asked for a list, show at most the top 3 items and say they can ask for more.\n\n"
                 f"Data:\n{context}\n\nQuestion: {text}\n\nAnswer:"
             )
             try:
@@ -675,7 +773,7 @@ class OpsProcessor:
         if self.llm.enabled:
             prompt = (
                 "You are an ops risk analyst. Analyze this data, surface what needs immediate attention, "
-                "and identify any patterns. Specific and actionable, 2-4 sentences.\n\n"
+                "and identify any pattern. Keep it to 2 short SMS-friendly sentences, with one next action.\n\n"
                 f"{snapshot}\n\nUser: {text}\n\nAnalysis:"
             )
             try:
@@ -756,6 +854,59 @@ class OpsProcessor:
         if category in ("electronics", "travel", "transfers") and amount > 500:
             score += 15
         return min(score, 100)
+
+    @staticmethod
+    def _is_conversational_or_meta(text: str) -> bool:
+        t = text.lower().strip()
+        conversational = {"hello", "hi", "hey", "thanks", "thank you", "ok", "okay", "yes", "no", "bye"}
+        return (
+            t in conversational
+            or (len(t.split()) <= 2 and not re.search(r"\d", t))
+            or OpsProcessor._is_conversational_status(t)
+            or OpsProcessor._is_capability_question(t)
+            or OpsProcessor._is_meta_usage_question(t)
+        )
+
+    @staticmethod
+    def _is_conversational_status(text: str) -> bool:
+        status_patterns = (
+            r"\bare you (active|alive|there|online|working|running|available)\b",
+            r"\byou (active|alive|there|online|working|running|available)\b",
+            r"\bis (anyone|somebody) (there|available)\b",
+            r"\bcan you (hear|see) me\b",
+            r"\bping\b",
+            r"\bstatus check\b",
+        )
+        return any(re.search(pattern, text) for pattern in status_patterns)
+
+    @staticmethod
+    def _is_capability_question(text: str) -> bool:
+        capability_patterns = (
+            r"\bwhat can you do\b",
+            r"\bwhat do you do\b",
+            r"\bhow can you help\b",
+            r"\bhow do you work\b",
+            r"\bwhat are you for\b",
+            r"^help[.!?]?$",
+            r"\bcommands?\b",
+            r"\bwhat should i ask\b",
+        )
+        return any(re.search(pattern, text) for pattern in capability_patterns)
+
+    @staticmethod
+    def _is_meta_usage_question(text: str) -> bool:
+        meta_patterns = (
+            r"\bwhat can i ask\b",
+            r"\bwhat should i ask\b",
+            r"\bwhat questions can i ask\b",
+            r"\bwhat can i say\b",
+            r"\bwhat should i say\b",
+            r"\bhow do i ask\b",
+            r"\bhow should i ask\b",
+            r"\bwhy did you (give|show|send|reply with)\b",
+            r"\bwhy are you (giving|showing|sending)\b",
+        )
+        return any(re.search(pattern, text) for pattern in meta_patterns)
 
     @staticmethod
     def _infer_ticket_category(text: str) -> str:

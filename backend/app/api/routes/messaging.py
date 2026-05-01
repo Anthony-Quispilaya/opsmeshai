@@ -185,6 +185,7 @@ async def _store_inbound_message(
             run.error_code = exc.code
             run.error_message = str(exc)
             run.trace = {"error": str(exc), "code": exc.code}
+            await db.flush()
 
     await db.commit()
     return WebhookInboundResponse(

@@ -67,15 +67,16 @@ class AgentOrchestrator:
                     assistant_message = self.llm.generate_reply(user_message, history=history)
                     steps.append("llm:openai:provider-default")
                 except Exception as exc:  # noqa: BLE001
-                    steps.append("llm:fallback")
-                    assistant_message = (
-                        "Router response fallback (LLM unavailable). "
-                        f"You said: '{user_message}'. Error: {exc}"
-                    )
+                    steps.append("llm:unavailable")
+                    raise OrchestratorError(
+                        "llm_unavailable",
+                        "The AI model is unavailable for this conversational message.",
+                    ) from exc
             else:
-                assistant_message = (
-                    "Router response: no tool execution required. "
-                    f"You said: '{user_message}'"
+                steps.append("llm:not_configured")
+                raise OrchestratorError(
+                    "llm_not_configured",
+                    "The AI model is not configured for this conversational message.",
                 )
 
         eval_sample = self.evaluation.sample_trace(steps)
