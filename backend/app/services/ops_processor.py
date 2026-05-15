@@ -46,6 +46,7 @@ UPDATE_COMPLIANCE_RECORD  data: {keywords, field, new_value}
 FLAG_TRANSACTION    data: {merchant, amount}
 UNFLAG_TRANSACTION  data: {merchant, amount}
 EXPLAIN_TRANSACTION data: {merchant, amount, temporal}   temporal=true if "recent/last/latest"
+FREEZE_ACCOUNT      data: {}   — user wants to freeze/lock their card or account
 QUERY_DATA          data: {domain, wants_list, wants_recent, wants_flagged, filter_status}
                          domain: transactions|support|compliance|all
 RUN_ANALYSIS        data: {}
@@ -192,6 +193,18 @@ class OpsProcessor:
         if any(k in t for k in compliance_kws):
             return {"intent": "ADD_COMPLIANCE_RECORD", "data": {}}
 
+        # FREEZE ACCOUNT
+        freeze_kws = [
+            "freeze my account", "freeze my card", "freeze account", "freeze card",
+            "lock my account", "lock my card", "lock account", "lock card",
+            "block my card", "block my account", "suspend my card", "suspend account",
+            "i want to freeze", "i need to freeze", "how do i freeze",
+            "call the bank", "what do i tell the bank", "what should i say to the bank",
+            "script for the bank", "bank customer service", "report fraud to bank",
+        ]
+        if any(k in t for k in freeze_kws):
+            return {"intent": "FREEZE_ACCOUNT", "data": {}}
+
         # ANALYSIS
         analysis_kws = ["check fraud", "fraud activity", "analyze", "summarize",
                         "what should i worry", "risk summary", "what needs attention",
@@ -235,6 +248,8 @@ class OpsProcessor:
             return await self._flag_transaction(data, text, db, flagged=False)
         if intent == "EXPLAIN_TRANSACTION":
             return await self._explain_transaction(data, text, db, history)
+        if intent == "FREEZE_ACCOUNT":
+            return await self._freeze_account_script(db)
         if intent == "QUERY_DATA":
             return await self._query(data, text, db, history)
         if intent == "RUN_ANALYSIS":
@@ -331,7 +346,6 @@ class OpsProcessor:
     async def _add_transaction(self, data: dict, text: str, db: AsyncSession) -> str:
         fallback_data = self._regex_parse_transaction(text)
         if not data.get("amount") or not data.get("merchant"):
-            # Data wasn't extracted by LLM — fall back to regex.
             data = fallback_data
         else:
             for key in ("item_name", "location", "category", "notes"):
@@ -357,10 +371,89 @@ class OpsProcessor:
                           f"Added: ${amount:.2f} at {merchant}", "SMS input", "sms", tx.id)
         await db.flush()
 
+        # Auto-generate a compliance record for any notable transaction
+        compliance_note = None
+        if risk >= 40 or category in {"luxury", "crypto", "cash", "transfers", "electronics", "travel"}:
+            compliance_note = await self._auto_compliance_record(tx, text, db)
+
         risk_label = "low" if risk < 31 else ("medium" if risk < 71 else "high")
         flag_note = " ⚑ Auto-flagged." if tx.flagged else ""
         item_note = f" Item: {item_name}." if item_name else ""
-        return f"✓ Transaction added: ${amount:.2f} at {merchant} ({location}).{item_note} Category: {category}. Risk: {risk_label}.{flag_note}"
+        compliance_note_text = f" Compliance record created: {compliance_note}" if compliance_note else ""
+        return (
+            f"✓ Transaction added: ${amount:.2f} at {merchant} ({location})."
+            f"{item_note} Category: {category}. Risk: {risk_label}.{flag_note}"
+            f"{compliance_note_text}"
+        )
+
+    async def _auto_compliance_record(self, tx: Transaction, user_text: str, db: AsyncSession) -> str | None:
+        """Generate and save a compliance record inferred from the transaction + what the user said."""
+        _HIGH_RISK_CATEGORIES = {"crypto", "cash", "transfers"}
+        policy_flag = tx.flagged or tx.category in _HIGH_RISK_CATEGORIES
+        severity = "high" if tx.risk_score >= 71 else ("medium" if tx.risk_score >= 40 else "low")
+        record_type = self._infer_compliance_type_for_tx(tx)
+
+        if self.llm.enabled:
+            prompt = (
+                "A transaction was just logged via SMS. Based on EXACTLY what the user said and "
+                "the transaction details, write a 1–2 sentence compliance note explaining:\n"
+                "1. What this transaction appears to be and its likely business or personal purpose\n"
+                "2. What compliance concern it raises (documentation needed, policy check, high risk, etc.)\n"
+                "Be specific using the actual merchant, amount, and context from the message. "
+                "Professional tone. Do not start with 'The user'.\n\n"
+                f"User message: \"{user_text}\"\n"
+                f"Merchant: {tx.merchant}\n"
+                f"Item: {tx.item_name or 'N/A'}\n"
+                f"Amount: ${tx.amount:.2f}\n"
+                f"Category: {tx.category}\n"
+                f"Location: {tx.location}\n"
+                f"Risk score: {tx.risk_score}/100\n"
+                f"Flagged: {tx.flagged}\n"
+            )
+            try:
+                description = await asyncio.to_thread(self.llm.generate_reply, prompt)
+            except Exception:
+                description = self._fallback_compliance_description(tx)
+        else:
+            description = self._fallback_compliance_description(tx)
+
+        record = ComplianceRecord(
+            id=str(uuid4()),
+            record_type=record_type,
+            description=description,
+            status="pending",
+            policy_flag=policy_flag,
+            severity=severity,
+            source="sms",
+        )
+        db.add(record)
+        await self._audit(db, "compliance_record_added", "compliance",
+                          f"Auto-compliance for ${tx.amount:.2f} at {tx.merchant}",
+                          "Auto-generated from SMS transaction", "sms", record.id)
+        await db.flush()
+        return record_type.replace("_", " ")
+
+    @staticmethod
+    def _infer_compliance_type_for_tx(tx: Transaction) -> str:
+        if tx.category in {"crypto", "cash"}:
+            return "unusual_approval"
+        if tx.category == "transfers":
+            return "manual_override"
+        if tx.category == "luxury":
+            return "expense_policy"
+        if tx.risk_score >= 71:
+            return "unusual_approval"
+        if tx.category in {"travel", "electronics"}:
+            return "expense_policy"
+        return "expense_policy"
+
+    @staticmethod
+    def _fallback_compliance_description(tx: Transaction) -> str:
+        return (
+            f"${tx.amount:.2f} {tx.category} transaction at {tx.merchant} ({tx.location}) "
+            f"logged via SMS. Risk score: {tx.risk_score}/100. "
+            "Requires review for policy compliance and supporting documentation."
+        )
 
     async def _add_support_ticket(self, data: dict, text: str, db: AsyncSession) -> str:
         desc = str(data.get("description") or text[:500]).strip()
@@ -605,6 +698,77 @@ class OpsProcessor:
         await db.flush()
         icon = "⚑" if flagged else "✓"
         return f"{icon} Transaction {action}: ${tx.amount:.2f} at {tx.merchant} ({tx.location}), {tx.created_at.date()}. Risk: {tx.risk_score}/100."
+
+    # ── FREEZE ACCOUNT ────────────────────────────────────────────────────────
+
+    async def _freeze_account_script(self, db: AsyncSession) -> str:
+        flagged_txs = list(
+            (
+                await db.execute(
+                    select(Transaction)
+                    .where(Transaction.flagged.is_(True))
+                    .order_by(Transaction.risk_score.desc())
+                    .limit(5)
+                )
+            ).scalars().all()
+        )
+
+        if flagged_txs:
+            tx_lines = "\n".join(
+                f"  - ${tx.amount:,.2f} at {tx.merchant} ({tx.location}) on {tx.created_at.strftime('%B %d')} — risk score {tx.risk_score}/100"
+                + (f", item: {tx.item_name}" if tx.item_name else "")
+                + (f". Note: {tx.notes}" if tx.notes else "")
+                for tx in flagged_txs
+            )
+            context = f"Flagged suspicious transactions on this account:\n{tx_lines}"
+        else:
+            context = "No specific flagged transactions found, but the account holder suspects unauthorized activity."
+
+        if self.llm.enabled:
+            prompt = (
+                "You are a financial security assistant. Write a clear, professional script "
+                "the account holder can read word-for-word to their bank's customer service "
+                "to freeze their card and report the suspicious activity below.\n\n"
+                "Requirements:\n"
+                "- Opening: state name intent immediately (freeze/lock card)\n"
+                "- Reference the specific suspicious transactions by merchant, amount, and date\n"
+                "- Ask them to flag the account for fraud investigation\n"
+                "- Request a case/reference number\n"
+                "- Ask what the next steps are\n"
+                "- Keep it under 200 words, clear and assertive\n"
+                "- Format with clear sections so it is easy to read aloud\n\n"
+                f"{context}\n\n"
+                "Write the script now:"
+            )
+            try:
+                script = await asyncio.to_thread(self.llm.generate_reply, prompt)
+                return f"📞 Bank Call Script\n\n{script}"
+            except Exception:
+                pass
+
+        # Fallback if LLM is off
+        tx_summary = ""
+        if flagged_txs:
+            tx_summary = " I am seeing the following suspicious charges: " + ", ".join(
+                f"${tx.amount:,.2f} at {tx.merchant} on {tx.created_at.strftime('%B %d')}"
+                for tx in flagged_txs[:3]
+            ) + "."
+
+        return (
+            "📞 Bank Call Script\n\n"
+            "OPENING:\n"
+            "\"Hello, my name is [Your Name] and my account number is [Account Number]. "
+            "I need to immediately freeze my card and report suspected fraudulent activity.\"\n\n"
+            "REPORT THE CHARGES:\n"
+            f"\"I have identified suspicious transactions on my account that I did not authorize.{tx_summary} "
+            "I believe my card details may have been compromised.\"\n\n"
+            "REQUEST ACTION:\n"
+            "\"I would like you to: freeze my card immediately, flag this account for a fraud investigation, "
+            "and dispute the unauthorized charges.\"\n\n"
+            "CLOSE:\n"
+            "\"Can I get a case or reference number for this report? "
+            "And what are the next steps I should expect?\""
+        )
 
     # ── EXPLAIN ───────────────────────────────────────────────────────────────
 

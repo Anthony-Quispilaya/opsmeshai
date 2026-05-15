@@ -205,6 +205,8 @@ export default function HomePage() {
   const [welcomeLoading, setWelcomeLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [automationLoading, setAutomationLoading] = useState<string | null>(null);
+  const [simulateLoading, setSimulateLoading] = useState(false);
+  const [simulateResult, setSimulateResult] = useState<string | null>(null);
 
   // Filters — transactions
   const [txF, setTxF] = useState<TxFilters>({ flagged: "all", risk: "all", category: "all", source: "all" });
@@ -502,6 +504,22 @@ export default function HomePage() {
     } finally { setActionLoading(null); }
   }
 
+  async function simulateFraud() {
+    const token = getStoredToken();
+    if (!token) return;
+    setSimulateLoading(true); setSimulateResult(null); setError(null);
+    try {
+      const res = await fetch(`${apiUrl}/api/v1/ops/simulate-fraud`, {
+        method: "POST",
+        headers: { ...authHeaders(token), "Content-Type": "application/json" } as HeadersInit,
+      });
+      if (!res.ok) { setError("Simulation failed."); return; }
+      const txs = (await res.json()) as { merchant: string; amount: number }[];
+      setSimulateResult(`🚨 ${txs.length} suspicious transactions injected — alert sent to your phone.`);
+      await load();
+    } finally { setSimulateLoading(false); }
+  }
+
   async function seedAutomationRules() {
     const token = getStoredToken();
     if (!token) return;
@@ -540,6 +558,26 @@ export default function HomePage() {
       {error && (
         <p className="rounded-lg border border-border/20 bg-surface-elevated/40 px-4 py-3 text-sm text-red-300">{error}</p>
       )}
+
+      {simulateResult && (
+        <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">{simulateResult}</p>
+      )}
+
+      {/* ── Fraud simulation ── */}
+      <div className="flex items-center justify-between rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3">
+        <div>
+          <p className="text-sm font-medium text-foreground">Fraud Simulation</p>
+          <p className="text-xs text-muted">Injects suspicious transactions and fires a real alert to your phone</p>
+        </div>
+        <Button
+          type="button"
+          variant="danger"
+          onClick={() => void simulateFraud()}
+          disabled={simulateLoading}
+        >
+          {simulateLoading ? "Simulating..." : "🚨 Simulate Fraud Alert"}
+        </Button>
+      </div>
 
       {/* ── Overview cards ── */}
       <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -1104,55 +1142,6 @@ export default function HomePage() {
           </>
         )}
       </div>
-
-      {/* ── Automation rules ── */}
-      <Card>
-        <CardHeader>
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <CardTitle>Automation Rules</CardTitle>
-              <CardDescription>Reusable scans that turn operational signals into approval-ready actions</CardDescription>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={() => void seedAutomationRules()}
-                disabled={automationLoading === "seed"}
-              >
-                {automationLoading === "seed" ? "Creating..." : "Create defaults"}
-              </Button>
-              <Button
-                type="button"
-                onClick={() => void runAutomationRules()}
-                disabled={automationLoading === "run"}
-              >
-                {automationLoading === "run" ? "Running..." : "Run rules"}
-              </Button>
-            </div>
-          </div>
-        </CardHeader>
-        <div className="grid gap-3 px-6 pb-6 lg:grid-cols-3">
-          {automationRules.length === 0 && (
-            <div className="rounded-md border border-border/10 bg-surface-elevated/35 px-4 py-5 text-sm text-muted lg:col-span-3">
-              No automation rules yet. Create defaults to start scanning transactions, tickets, and compliance.
-            </div>
-          )}
-          {automationRules.map(rule => (
-            <div key={rule.id} className="rounded-md border border-border/10 bg-surface-elevated/35 p-4">
-              <div className="mb-3 flex flex-wrap items-center gap-2">
-                <Badge tone={rule.enabled ? "accent" : "neutral"}>{rule.enabled ? "enabled" : "off"}</Badge>
-                <Badge tone="neutral">{fmtCat(rule.domain)}</Badge>
-              </div>
-              <h3 className="text-sm font-semibold">{rule.name}</h3>
-              <p className="mt-2 text-sm text-muted">{rule.description}</p>
-              <p className="mt-3 text-xs text-muted">
-                Last run: {rule.last_run_at ? fmt(rule.last_run_at) : "Never"}
-              </p>
-            </div>
-          ))}
-        </div>
-      </Card>
 
       {/* ── Agent action inbox ── */}
       <Card>

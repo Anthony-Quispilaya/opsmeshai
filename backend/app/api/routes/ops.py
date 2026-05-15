@@ -1,4 +1,5 @@
 import asyncio
+import random
 from collections import Counter
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -37,6 +38,20 @@ from backend.app.schemas.ops import (
 )
 from backend.app.services.agent_actions import AgentActionService
 from backend.app.services.automation_rules import AutomationRuleService
+from backend.app.services.onboarding import ensure_phone_thread
+from backend.app.services.photon_outbound import send_photon_bridge_message
+from backend.app.core.config import get_settings
+
+_FRAUD_SCENARIOS = [
+    {"merchant": "Dark Web Exchange",    "item_name": "Crypto Transfer",        "amount": 8500.00, "category": "crypto",    "location": "Unknown VPN",      "risk_score": 97, "notes": "IP flagged by threat intelligence feed"},
+    {"merchant": "Unnamed Wire Service", "item_name": "International Wire",     "amount": 4750.00, "category": "transfers", "location": "Eastern Europe",    "risk_score": 91, "notes": "Recipient account opened 3 days ago"},
+    {"merchant": "Shadow Crypto Desk",   "item_name": "BTC Purchase",           "amount": 6200.00, "category": "crypto",    "location": "Anonymous Relay",   "risk_score": 95, "notes": "No KYC on file for counterparty"},
+    {"merchant": "Offshore Holdings LLC","item_name": "Wire Transfer",          "amount": 9900.00, "category": "transfers", "location": "Cayman Islands",    "risk_score": 98, "notes": "Just under $10k reporting threshold"},
+    {"merchant": "Cash King ATM",        "item_name": "Cash Advance",           "amount": 2000.00, "category": "cash",      "location": "Las Vegas Strip",   "risk_score": 85, "notes": "3rd large withdrawal in 2 hours"},
+    {"merchant": "Anonymous Marketplace","item_name": "Unverified Purchase",    "amount": 3300.00, "category": "crypto",    "location": "Unknown",           "risk_score": 88, "notes": "No merchant verification on file"},
+    {"merchant": "Rapid FX Bureau",      "item_name": "Currency Exchange",      "amount": 5100.00, "category": "transfers", "location": "Miami, FL",         "risk_score": 86, "notes": "Destination currency: Monero (XMR)"},
+    {"merchant": "Ghost Card Terminal",  "item_name": "POS Transaction",        "amount": 1800.00, "category": "cash",      "location": "Unknown Terminal",  "risk_score": 83, "notes": "Card-not-present, no CVV match"},
+]
 
 router = APIRouter(prefix="/ops", tags=["ops"])
 _llm = LLMResponder()
@@ -441,6 +456,72 @@ async def run_automation_rules(
     result = await _automation.run_enabled(db)
     await db.commit()
     return AutomationRunResponse(**result)
+
+
+@router.post("/simulate-fraud", response_model=list[TransactionResponse])
+async def simulate_fraud(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[TransactionResponse]:
+    scenarios = random.sample(_FRAUD_SCENARIOS, k=3)
+    created: list[Transaction] = []
+    for s in scenarios:
+        tx = Transaction(
+            id=str(uuid4()),
+            merchant=s["merchant"],
+            item_name=s["item_name"],
+            amount=s["amount"],
+            category=s["category"],
+            location=s["location"],
+            risk_score=s["risk_score"],
+            flagged=True,
+            notes=s["notes"],
+            source="simulation",
+        )
+        db.add(tx)
+        created.append(tx)
+
+    await db.flush()
+
+    # Build alert lines
+    lines = "\n".join(
+        f"  • ${tx.amount:,.0f} at {tx.merchant} ({tx.location}) — risk {tx.risk_score}/100"
+        for tx in created
+    )
+    alert = (
+        f"🚨 FRAUD ALERT — OpsMesh AI\n\n"
+        f"{len(created)} suspicious transactions detected:\n\n"
+        f"{lines}\n\n"
+        f"All flagged automatically. Reply \"show flagged transactions\" to review "
+        f"or \"explain [merchant name]\" for details."
+    )
+
+    settings = get_settings()
+    if settings.feature_messaging_imessage and current_user.preferred_phone_number:
+        try:
+            thread = await ensure_phone_thread(db, current_user)
+            await asyncio.to_thread(
+                send_photon_bridge_message,
+                "imessage",
+                thread.id,
+                current_user.preferred_phone_number,
+                alert,
+            )
+        except Exception:
+            pass
+
+    db.add(AuditLog(
+        id=str(uuid4()),
+        event_type="fraud_simulation",
+        domain="transactions",
+        action_taken=f"Simulated {len(created)} suspicious transactions and sent phone alert",
+        reasoning="Manual fraud simulation triggered from dashboard",
+        source="dashboard",
+    ))
+    await db.commit()
+    for tx in created:
+        await db.refresh(tx)
+    return created  # type: ignore[return-value]
 
 
 @router.get("/daily-briefing", response_model=DailyBriefingResponse)
