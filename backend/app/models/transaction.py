@@ -13,6 +13,7 @@ class Transaction(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     amount: Mapped[float] = mapped_column(Float, nullable=False)
     merchant: Mapped[str] = mapped_column(String(255), nullable=False)
+    item_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     location: Mapped[str] = mapped_column(String(255), nullable=False, server_default="Unknown")
     category: Mapped[str] = mapped_column(String(64), nullable=False, server_default="retail")
     risk_score: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")

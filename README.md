@@ -44,8 +44,8 @@ Edit `.env` to match your local setup:
 Required baseline values:
 
 - `NEXT_PUBLIC_APP_URL=http://localhost:3000`
-- `NEXT_PUBLIC_API_URL=http://localhost:8000`
-- `API_URL=http://localhost:8000`
+- `NEXT_PUBLIC_API_URL=http://localhost:8002`
+- `API_URL=http://localhost:8002`
 - `BACKEND_CORS_ORIGINS=http://localhost:3000`
 - `ALLOWED_ORIGINS=http://localhost:3000`
 - `DATABASE_URL=postgresql+asyncpg://opsmesh:opsmesh@localhost:5432/opsmesh`
@@ -96,13 +96,13 @@ docker compose up -d postgres
 ```bash
 cd /home/anthony/OpenMeshAI/opsmesh-ai
 .venv/bin/alembic -c db/alembic.ini upgrade head
-.venv/bin/uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
+.venv/bin/uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8002
 ```
 
 Backend URLs:
 
-- API docs: [http://localhost:8000/docs](http://localhost:8000/docs)
-- Health endpoint: [http://localhost:8000/api/v1/health](http://localhost:8000/api/v1/health)
+- API docs: [http://localhost:8002/docs](http://localhost:8002/docs)
+- Health endpoint: [http://localhost:8002/api/v1/health](http://localhost:8002/api/v1/health)
 
 ### Terminal 3 - Frontend
 

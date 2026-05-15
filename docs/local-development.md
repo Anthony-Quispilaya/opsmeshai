@@ -37,10 +37,10 @@ Check that `.env` has these baseline values:
 
 ```bash
 NEXT_PUBLIC_APP_URL=http://localhost:3000
-NEXT_PUBLIC_API_URL=http://localhost:8000
-API_URL=http://localhost:8000
-ALLOWED_ORIGINS=http://localhost:3000
-BACKEND_CORS_ORIGINS=http://localhost:3000
+NEXT_PUBLIC_API_URL=http://localhost:8002
+API_URL=http://localhost:8002
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001
+BACKEND_CORS_ORIGINS=http://localhost:3000,http://localhost:3001
 DATABASE_URL=postgresql+asyncpg://opsmesh:opsmesh@localhost:5432/opsmesh
 PHOTON_BRIDGE_URL=http://127.0.0.1:8787
 PHOTON_BRIDGE_TOKEN=dev-bridge-token
@@ -72,13 +72,13 @@ Postgres should show as healthy.
 
 ```bash
 .venv/bin/alembic -c db/alembic.ini upgrade head
-.venv/bin/uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
+.venv/bin/uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8002
 ```
 
 Backend URLs:
 
-- API health: http://localhost:8000/api/v1/health
-- API docs: http://localhost:8000/docs
+- API health: http://localhost:8002/api/v1/health
+- API docs: http://localhost:8002/docs
 
 ### Terminal 3: Frontend
 

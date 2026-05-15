@@ -6,12 +6,22 @@ import { terminal } from "spectrum-ts/providers/terminal";
 import { imessage } from "spectrum-ts/providers/imessage";
 import { whatsappBusiness } from "spectrum-ts/providers/whatsapp-business";
 import { createClient as createWhatsappClient } from "@photon-ai/whatsapp-business";
-import { createClient as createIMessageClient, directChat } from "@photon-ai/advanced-imessage";
+import { createClient as createIMessageClient } from "@photon-ai/advanced-imessage";
+
+try {
+  process.loadEnvFile(".env");
+} catch (error) {
+  if (error?.code !== "ENOENT") throw error;
+}
 
 const PORT = Number(process.env.PHOTON_BRIDGE_PORT || "8787");
-const CALLBACK_URL =
-  process.env.PHOTON_CALLBACK_URL ||
-  "http://127.0.0.1:8000/api/v1/messaging/photon/events";
+const CALLBACK_URL = (() => {
+  if (process.env.PHOTON_CALLBACK_URL) return process.env.PHOTON_CALLBACK_URL;
+  if (process.env.API_URL) {
+    return new URL("/api/v1/messaging/photon/events", process.env.API_URL).toString();
+  }
+  return "http://127.0.0.1:8000/api/v1/messaging/photon/events";
+})();
 const CALLBACK_TOKEN = process.env.PHOTON_BRIDGE_TOKEN || "dev-bridge-token";
 const DEFAULT_THREAD_ID = process.env.PHOTON_BRIDGE_THREAD_ID || "";
 
@@ -110,8 +120,8 @@ async function sendIMessageDirect(to, messageText) {
   }
 
   try {
-    const sent = await remote.messages.send(directChat(to), messageText);
-    return sent?.guid || sent?.messageGuid || `bridge-${randomUUID()}`;
+    const sent = await remote.messages.sendText(`any;-;${to}`, messageText);
+    return sent?.guid || `bridge-${randomUUID()}`;
   } finally {
     await remote.close().catch(() => {});
   }

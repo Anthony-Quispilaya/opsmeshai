@@ -6,8 +6,8 @@ export type NavItem = {
 
 export const primaryNav: NavItem[] = [
   {
-    href: "/",
-    label: "Home",
+    href: "/dashboard",
+    label: "Dashboard",
     description: "Your agent and iMessage status",
   },
   {

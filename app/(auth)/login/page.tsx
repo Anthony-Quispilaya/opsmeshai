@@ -27,7 +27,7 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (getStoredToken()) router.replace("/");
+    if (getStoredToken()) router.replace("/dashboard");
   }, [router]);
 
   async function onSubmit(e: FormEvent) {
@@ -48,7 +48,7 @@ export default function LoginPage() {
       }
       const data = (await res.json()) as TokenResponse;
       setStoredToken(data.access_token);
-      router.replace("/");
+      router.replace("/dashboard");
     } catch {
       setError(`Cannot reach the API at ${apiUrl}. Is the backend running?`);
     } finally {

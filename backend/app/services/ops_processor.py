@@ -22,10 +22,10 @@ _PARSE_SYSTEM = """You are an ops data parser. Given a user message, return ONLY
 
 Supported intents:
 
-ADD_TRANSACTION        data: {amount, merchant, location, category, notes}
+ADD_TRANSACTION        data: {amount, merchant, item_name, location, category, notes}
 DELETE_TRANSACTION     data: {merchant, amount}            — at least one field
 UPDATE_TRANSACTION     data: {merchant, amount, field, new_value}
-                             field: category|location|notes|amount|merchant|flagged|risk_score
+                             field: category|location|notes|amount|merchant|item_name|flagged|risk_score
 
 ADD_SUPPORT_TICKET     data: {description, category, priority, customer_identifier}
                              category: refund_delay|login_issue|payment_failure|duplicate_charge|
@@ -329,20 +329,28 @@ class OpsProcessor:
     # ── ADD ───────────────────────────────────────────────────────────────────
 
     async def _add_transaction(self, data: dict, text: str, db: AsyncSession) -> str:
+        fallback_data = self._regex_parse_transaction(text)
         if not data.get("amount") or not data.get("merchant"):
-            # Data wasn't extracted by LLM — fall back to regex
-            data = self._regex_parse_transaction(text)
+            # Data wasn't extracted by LLM — fall back to regex.
+            data = fallback_data
+        else:
+            for key in ("item_name", "location", "category", "notes"):
+                if not data.get(key) and fallback_data.get(key):
+                    data[key] = fallback_data[key]
+            if data.get("category") in {"general", "retail"} and fallback_data.get("category") not in {None, "retail"}:
+                data["category"] = fallback_data["category"]
 
         amount = float(data.get("amount", 0))
         merchant = str(data.get("merchant", "Unknown")).strip()
+        item_name = self._clean_optional_text(data.get("item_name"))
         location = str(data.get("location") or "Unknown").strip()
         category = str(data.get("category") or "retail").strip()
-        notes = data.get("notes") or None
+        notes = self._clean_optional_text(data.get("notes"))
         risk = self._compute_risk(amount, category)
 
         tx = Transaction(
             id=str(uuid4()), amount=amount, merchant=merchant, location=location,
-            category=category, risk_score=risk, flagged=risk > 50, notes=notes, source="sms",
+            item_name=item_name, category=category, risk_score=risk, flagged=risk >= 71, notes=notes, source="sms",
         )
         db.add(tx)
         await self._audit(db, "transaction_added", "transactions",
@@ -351,7 +359,8 @@ class OpsProcessor:
 
         risk_label = "low" if risk < 31 else ("medium" if risk < 71 else "high")
         flag_note = " ⚑ Auto-flagged." if tx.flagged else ""
-        return f"✓ Transaction added: ${amount:.2f} at {merchant} ({location}). Category: {category}. Risk: {risk_label}.{flag_note}"
+        item_note = f" Item: {item_name}." if item_name else ""
+        return f"✓ Transaction added: ${amount:.2f} at {merchant} ({location}).{item_note} Category: {category}. Risk: {risk_label}.{flag_note}"
 
     async def _add_support_ticket(self, data: dict, text: str, db: AsyncSession) -> str:
         desc = str(data.get("description") or text[:500]).strip()
@@ -470,7 +479,7 @@ class OpsProcessor:
             return f"Found {len(rows)} matches. Which one?\n{opts}"
 
         tx = rows[0]
-        allowed = {"category", "location", "notes", "amount", "merchant", "flagged", "risk_score"}
+        allowed = {"category", "location", "notes", "amount", "merchant", "item_name", "flagged", "risk_score"}
         if field not in allowed:
             return f"Can't update field \"{field}\". Allowed: {', '.join(sorted(allowed))}."
 
@@ -631,8 +640,10 @@ class OpsProcessor:
 
         tx = rows[0]
         risk_label = "low" if tx.risk_score < 31 else ("medium" if tx.risk_score < 71 else "high")
+        item_context = f"Item: {tx.item_name}\n" if tx.item_name else ""
         context = (
             f"Merchant: {tx.merchant} | Amount: ${tx.amount:.2f} | Location: {tx.location}\n"
+            f"{item_context}"
             f"Category: {tx.category} | Date: {tx.created_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
             f"Risk score: {tx.risk_score}/100 ({risk_label}) | Flagged: {tx.flagged}\n"
             f"Source: {tx.source}"
@@ -822,9 +833,11 @@ class OpsProcessor:
         amount_m = re.search(r"\$?\s*(\d[\d,]*(?:\.\d{1,2})?)", text)
         amount = float(amount_m.group(1).replace(",", "")) if amount_m else 0.0
 
+        notes = self._extract_field_after_label(text, ("notes", "note", "memo", "reason"))
+        item_name = self._extract_field_after_label(text, ("item name", "item", "product name", "product"))
         as_merchant_m = re.search(r"(.+?)\s+as\s+(?:the\s+)?merchant", text, re.IGNORECASE)
         merchant_is_m = re.search(r"merchant\s+(?:is|:)\s+(.+?)(?:\s+and\s+(?:the\s+)?amount|\s*$)", text, re.IGNORECASE)
-        at_m = re.search(r"at\s+([A-Za-z][^,\n]+?)(?:\s+in\s+|\s+for\s+|\s+and\s+|\s*$)", text, re.IGNORECASE)
+        at_m = re.search(r"at\s+([A-Za-z][^,\n]+?)(?:\s+in\s+|\s+for\s+|\s+notes?\b|\s+memo\b|\s+reason\b|\s+and\s+|\s*$)", text, re.IGNORECASE)
 
         if as_merchant_m:
             merchant = re.sub(r"\$?\d[\d,]*(?:\.\d{1,2})?", "", as_merchant_m.group(1)).strip(" ,")
@@ -836,24 +849,85 @@ class OpsProcessor:
         else:
             merchant = "Unknown"
 
-        in_m = re.search(r"\bin\s+([A-Z][a-zA-Z ]+)", text)
+        if not item_name:
+            item_patterns = (
+                r"\b(?:bought|purchased|ordered)\s+(.+?)(?:\s+for\s+\$?\s*\d|\s+at\s+|\s+from\s+|\s+in\s+|\s+notes?\b|\s+memo\b|\s+reason\b|$)",
+                r"\b(?:spent|paid)\s+\$?\s*\d[\d,]*(?:\.\d{1,2})?\s+(?:on|for)\s+(.+?)(?:\s+at\s+|\s+from\s+|\s+in\s+|\s+notes?\b|\s+memo\b|\s+reason\b|$)",
+                r"\bfor\s+(.+?)(?:\s+at\s+|\s+from\s+|\s+in\s+|\s+notes?\b|\s+memo\b|\s+reason\b|$)",
+            )
+            for pattern in item_patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    item_name = self._clean_optional_text(match.group(1))
+                    break
+
+        in_m = re.search(r"\bin\s+([A-Z][a-zA-Z ]+?)(?:\s+notes?\b|\s+memo\b|\s+reason\b|$)", text)
         location = in_m.group(1).strip() if in_m else "Unknown"
-        return {"amount": amount, "merchant": merchant, "location": location, "category": "retail"}
+        return {
+            "amount": amount,
+            "merchant": merchant,
+            "item_name": item_name,
+            "location": location,
+            "category": self._infer_transaction_category(text, item_name),
+            "notes": notes,
+        }
 
     # ── Small inference helpers ───────────────────────────────────────────────
 
     @staticmethod
+    def _clean_optional_text(value: object) -> str | None:
+        if value is None:
+            return None
+        cleaned = re.sub(r"\s+", " ", str(value)).strip(" ,.;:-")
+        return cleaned or None
+
+    @staticmethod
+    def _extract_field_after_label(text: str, labels: tuple[str, ...]) -> str | None:
+        label_pattern = "|".join(re.escape(label) for label in labels)
+        stop_labels = "merchant|amount|location|category|risk|flag|notes?|memo|reason|item(?: name)?|product(?: name)?"
+        match = re.search(
+            rf"\b(?:{label_pattern})\s*(?:is|:|-)?\s+(.+?)(?=\s+\b(?:{stop_labels})\b\s*(?:is|:|-)?|$)",
+            text,
+            re.IGNORECASE,
+        )
+        return OpsProcessor._clean_optional_text(match.group(1)) if match else None
+
+    @staticmethod
+    def _infer_transaction_category(text: str, item_name: str | None = None) -> str:
+        t = f"{text} {item_name or ''}".lower()
+        _LUXURY = {
+            "louis vuitton", "vuitton", "gucci", "prada", "chanel", "hermès", "hermes",
+            "rolex", "versace", "burberry", "fendi", "balenciaga", "dior", "cartier",
+            "tiffany", "bentley", "ferrari", "lamborghini", "bvlgari", "bulgari",
+            "bottega", "saint laurent", "ysl", "givenchy", "valentino", "moncler",
+        }
+        if any(brand in t for brand in _LUXURY) or "luxury" in t:
+            return "luxury"
+        if any(w in t for w in ("laptop", "computer", "phone", "ipad", "iphone", "macbook", "monitor", "keyboard", "software", "samsung", "galaxy")):
+            return "electronics"
+        if any(w in t for w in ("flight", "hotel", "airbnb", "uber", "lyft", "travel", "airline", "rental car", "airways", "airlines")):
+            return "travel"
+        if any(w in t for w in ("restaurant", "lunch", "dinner", "coffee", "food", "meal", "cafe", "sushi", "pizza", "burger")):
+            return "meals"
+        if any(w in t for w in ("transfer", "wire", "ach", "zelle", "venmo", "cashapp")):
+            return "transfers"
+        if any(w in t for w in ("grocery", "groceries", "supermarket", "whole foods", "costco", "trader joe")):
+            return "groceries"
+        return "retail"
+
+    @staticmethod
     def _compute_risk(amount: float, category: str) -> int:
-        score = 0
-        if amount > 2500:
-            score += 40
-        elif amount > 1000:
-            score += 20
-        elif amount > 500:
-            score += 10
-        if category in ("electronics", "travel", "transfers") and amount > 500:
-            score += 15
-        return min(score, 100)
+        # Matches _risk_from_transaction in ops.py exactly
+        risk = 15
+        if amount >= 2000:
+            risk += 55
+        elif amount >= 500:
+            risk += 30
+        elif amount >= 150:
+            risk += 12
+        if category.lower() in {"travel", "electronics", "luxury", "cash", "crypto", "transfers"}:
+            risk += 15
+        return min(risk, 100)
 
     @staticmethod
     def _is_conversational_or_meta(text: str) -> bool:

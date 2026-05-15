@@ -17,3 +17,196 @@
     @apply outline-none shadow-focus rounded-sm;
   }
 }
+
+@layer utilities {
+  @keyframes landingRise {
+    0% {
+      opacity: 0;
+      filter: blur(10px);
+      transform: translateY(46px) scale(0.94);
+    }
+    68% {
+      opacity: 1;
+      filter: blur(0);
+      transform: translateY(-8px) scale(1.018);
+    }
+    100% {
+      opacity: 1;
+      filter: blur(0);
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  @keyframes landingFloat {
+    0% {
+      opacity: 0;
+      filter: blur(12px);
+      transform: translateY(44px) scale(0.95);
+    }
+    72% {
+      opacity: 1;
+      filter: blur(0);
+      transform: translateY(-10px) scale(1.015);
+    }
+    100% {
+      opacity: 1;
+      filter: blur(0);
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  @keyframes landingPop {
+    0% {
+      opacity: 0;
+      filter: blur(8px);
+      transform: translateY(28px) scale(0.9);
+    }
+    62% {
+      opacity: 1;
+      filter: blur(0);
+      transform: translateY(-6px) scale(1.035);
+    }
+    100% {
+      opacity: 1;
+      filter: blur(0);
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  @keyframes scrollDrift {
+    from {
+      transform: translateY(-16px) scale(1.015);
+    }
+    to {
+      transform: translateY(18px) scale(0.992);
+    }
+  }
+
+  @keyframes softGlow {
+    0%,
+    100% {
+      box-shadow: 0 8px 32px rgb(0 0 0 / 0.35);
+      border-color: rgb(255 255 255 / 0.1);
+    }
+    50% {
+      box-shadow: 0 18px 58px rgb(59 130 246 / 0.22);
+      border-color: rgb(59 130 246 / 0.34);
+    }
+  }
+
+  .reveal-on-scroll {
+    animation: landingRise 0.9s cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation-timeline: view();
+    animation-range: entry 0% cover 36%;
+    transform-origin: center bottom;
+    will-change: opacity, transform, filter;
+  }
+
+  .reveal-pop {
+    animation: landingPop 0.82s cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation-timeline: view();
+    animation-range: entry 0% cover 32%;
+    transform-origin: center bottom;
+    will-change: opacity, transform, filter;
+  }
+
+  .scroll-drift {
+    animation: scrollDrift linear both;
+    animation-timeline: scroll(root);
+    animation-range: 0 1200px;
+    will-change: transform;
+  }
+
+  .motion-card {
+    transition:
+      transform 420ms cubic-bezier(0.16, 1, 0.3, 1),
+      border-color 420ms ease,
+      background-color 420ms ease,
+      box-shadow 420ms ease;
+  }
+
+  .motion-card:hover {
+    transform: translateY(-6px) scale(1.012);
+    border-color: rgb(59 130 246 / 0.42);
+    box-shadow: 0 18px 60px rgb(0 0 0 / 0.42);
+  }
+
+  .motion-link {
+    transition:
+      transform 260ms cubic-bezier(0.16, 1, 0.3, 1),
+      opacity 260ms ease,
+      background-color 260ms ease,
+      border-color 260ms ease;
+  }
+
+  .motion-link:hover {
+    transform: translateY(-2px) scale(1.025);
+  }
+
+  .soft-glow {
+    animation: softGlow 4.8s ease-in-out infinite;
+  }
+
+  [data-scroll-reveal] {
+    opacity: 0;
+    filter: blur(4px);
+    transform: translateY(42px) scale(0.96);
+    transition:
+      opacity 760ms ease,
+      filter 650ms ease,
+      transform 900ms cubic-bezier(0.16, 1, 0.3, 1);
+    transition-delay: var(--reveal-delay, 0ms);
+    will-change: opacity, transform, filter;
+  }
+
+  [data-scroll-reveal].is-visible {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0) scale(1);
+  }
+
+  [data-scroll-reveal="pop"] {
+    transform: translateY(46px) scale(0.92);
+  }
+
+  [data-scroll-reveal="pop"].is-visible {
+    transform: translateY(0) scale(1);
+  }
+
+  [data-scroll-reveal="slide-left"] {
+    transform: translateX(-34px) translateY(18px) scale(0.97);
+  }
+
+  [data-scroll-reveal="slide-right"] {
+    transform: translateX(34px) translateY(18px) scale(0.97);
+  }
+
+  [data-scroll-reveal="slide-left"].is-visible,
+  [data-scroll-reveal="slide-right"].is-visible {
+    transform: translateX(0) translateY(0) scale(1);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .reveal-on-scroll,
+    .reveal-pop,
+    .scroll-drift,
+    .soft-glow,
+    [data-scroll-reveal],
+    [class*="landingRise"],
+    [class*="landingFloat"] {
+      animation: none !important;
+    }
+
+    [data-scroll-reveal] {
+      opacity: 1 !important;
+      filter: none !important;
+      transform: none !important;
+      transition: none !important;
+    }
+
+    .motion-card,
+    .motion-link {
+      transition: none !important;
+    }
+  }
+}

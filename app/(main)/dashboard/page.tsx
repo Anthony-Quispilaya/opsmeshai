@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { TopBar } from "@/components/layout/top-bar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { apiBaseUrl, authHeaders, getStoredToken } from "@/lib/auth-token";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -20,8 +21,8 @@ type DashboardSummary = {
   open_support_tickets: number; pending_compliance_items: number;
 };
 type Transaction = {
-  id: string; amount: number; merchant: string; location: string;
-  category: string; risk_score: number; flagged: boolean; source: string; created_at: string;
+  id: string; amount: number; merchant: string; item_name: string | null; location: string;
+  category: string; risk_score: number; flagged: boolean; notes: string | null; source: string; created_at: string;
 };
 type SupportTicket = {
   id: string; customer_identifier: string | null; description: string;
@@ -61,6 +62,18 @@ type TxFilters    = { flagged: "all"|"yes"|"no"; risk: "all"|"low"|"medium"|"hig
 type TkFilters    = { status: "all"|"open"|"in_review"|"resolved"; priority: "all"|"high"|"medium"|"low"; category: string };
 type CrFilters    = { status: "all"|"pending"|"approved"|"rejected"; severity: "all"|"high"|"medium"|"low"; policy_flag: "all"|"yes"|"no" };
 type OpsTab = "transactions"|"support"|"compliance";
+type TransactionForm = {
+  merchant: string; item_name: string; amount: string; location: string; category: string;
+  risk_score: string; flagged: boolean; notes: string;
+};
+type SupportForm = {
+  description: string; category: string; priority: "low"|"medium"|"high";
+  status: "open"|"in_review"|"resolved"; customer_identifier: string;
+};
+type ComplianceForm = {
+  description: string; record_type: string; status: "pending"|"approved"|"rejected";
+  policy_flag: boolean; severity: "low"|"medium"|"high"; recommendation: string;
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -159,6 +172,16 @@ const agentExamples: Record<OpsTab, { label: string; examples: string[] }> = {
   },
 };
 
+const initialTxForm: TransactionForm = {
+  merchant: "", item_name: "", amount: "", location: "", category: "retail", risk_score: "", flagged: false, notes: "",
+};
+const initialSupportForm: SupportForm = {
+  description: "", category: "general", priority: "medium", status: "open", customer_identifier: "",
+};
+const initialComplianceForm: ComplianceForm = {
+  description: "", record_type: "general", status: "pending", policy_flag: false, severity: "low", recommendation: "",
+};
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function HomePage() {
@@ -185,10 +208,18 @@ export default function HomePage() {
 
   // Filters — transactions
   const [txF, setTxF] = useState<TxFilters>({ flagged: "all", risk: "all", category: "all", source: "all" });
+  const [txSearch, setTxSearch] = useState("");
   // Filters — support tickets
   const [tkF, setTkF] = useState<TkFilters>({ status: "all", priority: "all", category: "all" });
+  const [tkSearch, setTkSearch] = useState("");
   // Filters — compliance
   const [crF, setCrF] = useState<CrFilters>({ status: "all", severity: "all", policy_flag: "all" });
+  const [crSearch, setCrSearch] = useState("");
+  // Manual dashboard entry forms
+  const [txForm, setTxForm] = useState<TransactionForm>(initialTxForm);
+  const [supportForm, setSupportForm] = useState<SupportForm>(initialSupportForm);
+  const [complianceForm, setComplianceForm] = useState<ComplianceForm>(initialComplianceForm);
+  const [manualLoading, setManualLoading] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const token = getStoredToken();
@@ -238,23 +269,35 @@ export default function HomePage() {
     if (txF.risk !== "all" && riskLabel(t.risk_score) !== txF.risk) return false;
     if (txF.category !== "all" && t.category !== txF.category) return false;
     if (txF.source   !== "all" && t.source   !== txF.source)   return false;
+    if (txSearch) {
+      const q = txSearch.toLowerCase();
+      if (!`${t.merchant} ${t.item_name ?? ""} ${t.notes ?? ""} ${t.location} ${t.category} ${t.source}`.toLowerCase().includes(q)) return false;
+    }
     return true;
-  }), [transactions, txF]);
+  }), [transactions, txF, txSearch]);
 
   const visibleTk = useMemo(() => tickets.filter(t => {
     if (tkF.status   !== "all" && t.status   !== tkF.status)   return false;
     if (tkF.priority !== "all" && t.priority !== tkF.priority) return false;
     if (tkF.category !== "all" && t.category !== tkF.category) return false;
+    if (tkSearch) {
+      const q = tkSearch.toLowerCase();
+      if (!`${t.description} ${t.category} ${t.customer_identifier ?? ""}`.toLowerCase().includes(q)) return false;
+    }
     return true;
-  }), [tickets, tkF]);
+  }), [tickets, tkF, tkSearch]);
 
   const visibleCr = useMemo(() => compliance.filter(r => {
     if (crF.status      !== "all" && r.status            !== crF.status)   return false;
     if (crF.severity    !== "all" && (r.severity ?? "low") !== crF.severity) return false;
     if (crF.policy_flag === "yes" && !r.policy_flag) return false;
     if (crF.policy_flag === "no"  && r.policy_flag)  return false;
+    if (crSearch) {
+      const q = crSearch.toLowerCase();
+      if (!`${r.description} ${r.record_type}`.toLowerCase().includes(q)) return false;
+    }
     return true;
-  }), [compliance, crF]);
+  }), [compliance, crF, crSearch]);
 
   // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -268,6 +311,151 @@ export default function HomePage() {
   const anyTxActive = txF.flagged !== "all" || txF.risk !== "all" || txF.category !== "all" || txF.source !== "all";
   const anyTkActive = tkF.status  !== "all" || tkF.priority !== "all" || tkF.category !== "all";
   const anyCrActive = crF.status  !== "all" || crF.severity !== "all" || crF.policy_flag !== "all";
+
+  async function opsRequest(path: string, options: RequestInit = {}) {
+    const token = getStoredToken();
+    if (!token) return null;
+    const res = await fetch(`${apiUrl}${path}`, {
+      ...options,
+      headers: {
+        ...authHeaders(token),
+        "Content-Type": "application/json",
+        ...(options.headers || {}),
+      } as HeadersInit,
+    });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { detail?: string };
+      throw new Error(body.detail || `Request failed (${res.status})`);
+    }
+    return res;
+  }
+
+  async function createTransaction(e: FormEvent) {
+    e.preventDefault();
+    setManualLoading("create-transaction"); setError(null);
+    try {
+      await opsRequest("/api/v1/ops/transactions", {
+        method: "POST",
+        body: JSON.stringify({
+          merchant: txForm.merchant.trim(),
+          item_name: txForm.item_name.trim() || null,
+          amount: Number(txForm.amount),
+          location: txForm.location.trim() || "Unknown",
+          category: txForm.category.trim() || "retail",
+          risk_score: txForm.risk_score ? Number(txForm.risk_score) : undefined,
+          flagged: txForm.flagged,
+          notes: txForm.notes.trim() || null,
+        }),
+      });
+      setTxForm(initialTxForm);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not add transaction.");
+    } finally { setManualLoading(null); }
+  }
+
+  async function updateTransaction(id: string, body: Partial<Transaction>) {
+    setManualLoading(id); setError(null);
+    try {
+      await opsRequest(`/api/v1/ops/transactions/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update transaction.");
+    } finally { setManualLoading(null); }
+  }
+
+  async function deleteTransaction(id: string) {
+    setManualLoading(id); setError(null);
+    try {
+      await opsRequest(`/api/v1/ops/transactions/${id}`, { method: "DELETE" });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete transaction.");
+    } finally { setManualLoading(null); }
+  }
+
+  async function createSupportTicket(e: FormEvent) {
+    e.preventDefault();
+    setManualLoading("create-support"); setError(null);
+    try {
+      await opsRequest("/api/v1/ops/support-tickets", {
+        method: "POST",
+        body: JSON.stringify({
+          description: supportForm.description.trim(),
+          category: supportForm.category.trim() || "general",
+          status: supportForm.status,
+          priority: supportForm.priority,
+          customer_identifier: supportForm.customer_identifier.trim() || null,
+        }),
+      });
+      setSupportForm(initialSupportForm);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not add support ticket.");
+    } finally { setManualLoading(null); }
+  }
+
+  async function updateSupportTicket(id: string, body: Partial<SupportTicket>) {
+    setManualLoading(id); setError(null);
+    try {
+      await opsRequest(`/api/v1/ops/support-tickets/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update support ticket.");
+    } finally { setManualLoading(null); }
+  }
+
+  async function deleteSupportTicket(id: string) {
+    setManualLoading(id); setError(null);
+    try {
+      await opsRequest(`/api/v1/ops/support-tickets/${id}`, { method: "DELETE" });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete support ticket.");
+    } finally { setManualLoading(null); }
+  }
+
+  async function createComplianceRecord(e: FormEvent) {
+    e.preventDefault();
+    setManualLoading("create-compliance"); setError(null);
+    try {
+      await opsRequest("/api/v1/ops/compliance", {
+        method: "POST",
+        body: JSON.stringify({
+          description: complianceForm.description.trim(),
+          record_type: complianceForm.record_type.trim() || "general",
+          status: complianceForm.status,
+          policy_flag: complianceForm.policy_flag,
+          severity: complianceForm.severity,
+          recommendation: complianceForm.recommendation.trim() || null,
+        }),
+      });
+      setComplianceForm(initialComplianceForm);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not add compliance record.");
+    } finally { setManualLoading(null); }
+  }
+
+  async function updateComplianceRecord(id: string, body: Partial<ComplianceRecord>) {
+    setManualLoading(id); setError(null);
+    try {
+      await opsRequest(`/api/v1/ops/compliance/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update compliance record.");
+    } finally { setManualLoading(null); }
+  }
+
+  async function deleteComplianceRecord(id: string) {
+    setManualLoading(id); setError(null);
+    try {
+      await opsRequest(`/api/v1/ops/compliance/${id}`, { method: "DELETE" });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete compliance record.");
+    } finally { setManualLoading(null); }
+  }
 
   async function resendWelcome() {
     const token = getStoredToken();
@@ -343,7 +531,7 @@ export default function HomePage() {
   }
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-4">
       <TopBar
         title={me ? `Welcome, ${me.full_name}` : "Operations dashboard"}
         subtitle="Messaging-first AI workflow platform — transact, query, and analyze directly from your phone."
@@ -433,9 +621,58 @@ export default function HomePage() {
 
         {/* ── TRANSACTIONS ── */}
         {activeTab === "transactions" && (
+          <>
+          <Card className="mb-3 p-5">
+            <form className="grid gap-3 lg:grid-cols-12" onSubmit={createTransaction}>
+              <div className="lg:col-span-3">
+                <p className="mb-1 text-xs text-muted">Merchant</p>
+                <Input value={txForm.merchant} onChange={e => setTxForm(f => ({ ...f, merchant: e.target.value }))} required placeholder="Apple Store" />
+              </div>
+              <div className="lg:col-span-3">
+                <p className="mb-1 text-xs text-muted">Item</p>
+                <Input value={txForm.item_name} onChange={e => setTxForm(f => ({ ...f, item_name: e.target.value }))} placeholder="MacBook Pro" />
+              </div>
+              <div className="lg:col-span-2">
+                <p className="mb-1 text-xs text-muted">Amount</p>
+                <Input type="number" min="0.01" step="0.01" value={txForm.amount} onChange={e => setTxForm(f => ({ ...f, amount: e.target.value }))} required placeholder="2400" />
+              </div>
+              <div className="lg:col-span-2">
+                <p className="mb-1 text-xs text-muted">Location</p>
+                <Input value={txForm.location} onChange={e => setTxForm(f => ({ ...f, location: e.target.value }))} placeholder="Miami" />
+              </div>
+              <div className="lg:col-span-2">
+                <p className="mb-1 text-xs text-muted">Category</p>
+                <Input value={txForm.category} onChange={e => setTxForm(f => ({ ...f, category: e.target.value }))} placeholder="retail" />
+              </div>
+              <div className="lg:col-span-2">
+                <p className="mb-1 text-xs text-muted">Risk</p>
+                <Input type="number" min="0" max="100" value={txForm.risk_score} onChange={e => setTxForm(f => ({ ...f, risk_score: e.target.value }))} placeholder="auto" />
+              </div>
+              <label className="flex items-end gap-2 pb-2 text-sm lg:col-span-1">
+                <input type="checkbox" checked={txForm.flagged} onChange={e => setTxForm(f => ({ ...f, flagged: e.target.checked }))} />
+                Flag
+              </label>
+              <div className="flex items-end lg:col-span-1">
+                <Button type="submit" className="w-full" disabled={manualLoading === "create-transaction"}>
+                  {manualLoading === "create-transaction" ? "Adding..." : "Add"}
+                </Button>
+              </div>
+              <div className="lg:col-span-12">
+                <p className="mb-1 text-xs text-muted">Notes</p>
+                <Input value={txForm.notes} onChange={e => setTxForm(f => ({ ...f, notes: e.target.value }))} placeholder="Receipt missing, manager approved, demo purchase, unusual amount..." />
+              </div>
+            </form>
+          </Card>
           <Card className="overflow-hidden p-0">
             {/* Filter bar */}
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border/10 bg-surface-elevated/30 px-5 py-3">
+              <input
+                type="search"
+                value={txSearch}
+                onChange={e => setTxSearch(e.target.value)}
+                placeholder="Search transactions..."
+                className="h-7 w-48 rounded border border-border/20 bg-surface-elevated px-2.5 text-xs text-foreground placeholder:text-muted outline-none focus:border-accent/40"
+              />
               <FilterPills
                 label="Flagged"
                 value={txF.flagged}
@@ -475,8 +712,8 @@ export default function HomePage() {
               )}
               <div className="ml-auto flex items-center gap-3">
                 <ActiveCount shown={visibleTx.length} total={transactions.length} />
-                {anyTxActive && (
-                  <button onClick={resetTxF} className="text-xs text-accent-foreground hover:underline">
+                {(anyTxActive || txSearch) && (
+                  <button onClick={() => { resetTxF(); setTxSearch(""); }} className="text-xs text-accent-foreground hover:underline">
                     Clear filters
                   </button>
                 )}
@@ -486,48 +723,116 @@ export default function HomePage() {
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-border/10 text-xs text-muted">
-                    <th className="px-5 py-2.5 text-left">Merchant</th>
-                    <th className="px-4 py-2.5 text-right">Amount</th>
-                    <th className="px-4 py-2.5 text-left">Location</th>
-                    <th className="px-4 py-2.5 text-left">Category</th>
-                    <th className="px-4 py-2.5 text-center">Risk</th>
-                    <th className="px-4 py-2.5 text-left">Date</th>
-                    <th className="px-4 py-2.5 text-left">Source</th>
+                  <tr className="border-b border-border/10">
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Merchant</th>
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Item / Notes</th>
+                    <th className="px-5 py-4 text-right text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Amount</th>
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Location</th>
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Category</th>
+                    <th className="px-5 py-4 text-center text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Risk</th>
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Date</th>
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Source</th>
+                    <th className="px-5 py-4 text-right text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {visibleTx.length === 0 && (
-                    <tr><td colSpan={7} className="px-5 py-8 text-center text-muted">No transactions match these filters.</td></tr>
+                    <tr><td colSpan={9} className="px-5 py-10 text-center text-sm text-muted">No transactions match these filters.</td></tr>
                   )}
                   {visibleTx.map(tx => (
                     <tr key={tx.id} className="border-b border-border/5 hover:bg-surface-elevated/30">
-                      <td className="px-5 py-2.5 font-medium">
-                        {tx.flagged && <span className="mr-1.5 text-red-400">⚑</span>}
-                        {tx.merchant}
+                      <td className="px-5 py-4 whitespace-nowrap">
+                        <div className="flex items-center gap-1.5 font-medium">
+                          {tx.flagged && <span className="text-xs text-red-400">⚑</span>}
+                          {tx.merchant}
+                        </div>
                       </td>
-                      <td className="px-4 py-2.5 text-right font-mono">${tx.amount.toFixed(2)}</td>
-                      <td className="px-4 py-2.5 text-muted">{tx.location}</td>
-                      <td className="px-4 py-2.5 text-muted">{fmtCat(tx.category)}</td>
-                      <td className="px-4 py-2.5 text-center">
-                        <span className={`font-medium ${riskColor(tx.risk_score)}`}>{riskLabel(tx.risk_score)}</span>
+                      <td className="px-5 py-4">
+                        <div className="font-medium">{tx.item_name ?? "—"}</div>
+                        {tx.notes && <div className="text-xs text-muted">{tx.notes}</div>}
+                      </td>
+                      <td className="px-5 py-4 whitespace-nowrap text-right font-mono tabular-nums">${tx.amount.toFixed(2)}</td>
+                      <td className="px-5 py-4 whitespace-nowrap text-muted">{tx.location}</td>
+                      <td className="px-5 py-4 whitespace-nowrap text-muted">{fmtCat(tx.category)}</td>
+                      <td className="px-5 py-4 whitespace-nowrap text-center">
+                        <span className={`text-xs font-semibold ${riskColor(tx.risk_score)}`}>{riskLabel(tx.risk_score)}</span>
                         <span className="ml-1 text-xs text-muted">({tx.risk_score})</span>
                       </td>
-                      <td className="px-4 py-2.5 text-muted">{fmt(tx.created_at)}</td>
-                      <td className="px-4 py-2.5 text-muted">{tx.source}</td>
+                      <td className="px-5 py-4 whitespace-nowrap text-xs text-muted">{fmt(tx.created_at)}</td>
+                      <td className="px-5 py-4 whitespace-nowrap text-xs text-muted">{tx.source}</td>
+                      <td className="px-5 py-4 whitespace-nowrap">
+                        <div className="flex justify-end gap-1.5">
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            className="h-7 px-2.5 text-xs"
+                            onClick={() => void updateTransaction(tx.id, { flagged: !tx.flagged, risk_score: tx.flagged ? Math.min(tx.risk_score, 50) : Math.max(tx.risk_score, 65) })}
+                            disabled={manualLoading === tx.id}
+                          >
+                            {tx.flagged ? "Unflag" : "Flag"}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="danger"
+                            className="h-7 px-2.5 text-xs"
+                            onClick={() => void deleteTransaction(tx.id)}
+                            disabled={manualLoading === tx.id}
+                          >
+                            Delete
+                          </Button>
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
           </Card>
+          </>
         )}
 
         {/* ── SUPPORT TICKETS ── */}
         {activeTab === "support" && (
+          <>
+          <Card className="mb-3 p-5">
+            <form className="grid gap-3 lg:grid-cols-12" onSubmit={createSupportTicket}>
+              <div className="lg:col-span-5">
+                <p className="mb-1 text-xs text-muted">Issue</p>
+                <Input value={supportForm.description} onChange={e => setSupportForm(f => ({ ...f, description: e.target.value }))} required placeholder="Customer says refund still not received" />
+              </div>
+              <div className="lg:col-span-2">
+                <p className="mb-1 text-xs text-muted">Category</p>
+                <Input value={supportForm.category} onChange={e => setSupportForm(f => ({ ...f, category: e.target.value }))} placeholder="refund_delay" />
+              </div>
+              <div className="lg:col-span-2">
+                <p className="mb-1 text-xs text-muted">Priority</p>
+                <select value={supportForm.priority} onChange={e => setSupportForm(f => ({ ...f, priority: e.target.value as SupportForm["priority"] }))} className="h-10 w-full rounded-md border border-border/10 bg-surface-elevated/40 px-3 py-2 text-sm">
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                </select>
+              </div>
+              <div className="lg:col-span-2">
+                <p className="mb-1 text-xs text-muted">Customer</p>
+                <Input value={supportForm.customer_identifier} onChange={e => setSupportForm(f => ({ ...f, customer_identifier: e.target.value }))} placeholder="Order 4832" />
+              </div>
+              <div className="flex items-end lg:col-span-1">
+                <Button type="submit" className="w-full" disabled={manualLoading === "create-support"}>
+                  {manualLoading === "create-support" ? "Adding..." : "Add"}
+                </Button>
+              </div>
+            </form>
+          </Card>
           <Card className="overflow-hidden p-0">
             {/* Filter bar */}
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border/10 bg-surface-elevated/30 px-5 py-3">
+              <input
+                type="search"
+                value={tkSearch}
+                onChange={e => setTkSearch(e.target.value)}
+                placeholder="Search tickets..."
+                className="h-7 w-48 rounded border border-border/20 bg-surface-elevated px-2.5 text-xs text-foreground placeholder:text-muted outline-none focus:border-accent/40"
+              />
               <FilterPills
                 label="Status"
                 value={tkF.status}
@@ -560,8 +865,8 @@ export default function HomePage() {
               )}
               <div className="ml-auto flex items-center gap-3">
                 <ActiveCount shown={visibleTk.length} total={tickets.length} />
-                {anyTkActive && (
-                  <button onClick={resetTkF} className="text-xs text-accent-foreground hover:underline">
+                {(anyTkActive || tkSearch) && (
+                  <button onClick={() => { resetTkF(); setTkSearch(""); }} className="text-xs text-accent-foreground hover:underline">
                     Clear filters
                   </button>
                 )}
@@ -571,46 +876,117 @@ export default function HomePage() {
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-border/10 text-xs text-muted">
-                    <th className="px-5 py-2.5 text-left">Issue</th>
-                    <th className="px-4 py-2.5 text-left">Category</th>
-                    <th className="px-4 py-2.5 text-left">Status</th>
-                    <th className="px-4 py-2.5 text-left">Priority</th>
-                    <th className="px-4 py-2.5 text-left">Customer</th>
-                    <th className="px-4 py-2.5 text-left">Created</th>
+                  <tr className="border-b border-border/10">
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Issue</th>
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Category</th>
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Status</th>
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Priority</th>
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Customer</th>
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Created</th>
+                    <th className="px-5 py-4 text-right text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {visibleTk.length === 0 && (
-                    <tr><td colSpan={6} className="px-5 py-8 text-center text-muted">No tickets match these filters.</td></tr>
+                    <tr><td colSpan={7} className="px-5 py-10 text-center text-sm text-muted">No tickets match these filters.</td></tr>
                   )}
                   {visibleTk.map(tk => (
                     <tr key={tk.id} className="border-b border-border/5 hover:bg-surface-elevated/30">
-                      <td className="max-w-xs px-5 py-2.5">
-                        <p className="truncate font-medium">{tk.description}</p>
+                      <td className="px-5 py-4 font-medium">{tk.description}</td>
+                      <td className="px-5 py-4 whitespace-nowrap text-muted">{fmtCat(tk.category)}</td>
+                      <td className="px-5 py-4 whitespace-nowrap">
+                        <span className={`text-xs font-semibold ${statusColor(tk.status)}`}>{fmtCat(tk.status)}</span>
                       </td>
-                      <td className="px-4 py-2.5 text-muted">{fmtCat(tk.category)}</td>
-                      <td className="px-4 py-2.5">
-                        <span className={`font-medium ${statusColor(tk.status)}`}>{fmtCat(tk.status)}</span>
+                      <td className="px-5 py-4 whitespace-nowrap">
+                        <span className={`text-xs font-semibold ${priorityColor(tk.priority)}`}>{tk.priority}</span>
                       </td>
-                      <td className="px-4 py-2.5">
-                        <span className={`font-medium ${priorityColor(tk.priority)}`}>{tk.priority}</span>
+                      <td className="px-5 py-4 whitespace-nowrap text-muted">{tk.customer_identifier ?? "—"}</td>
+                      <td className="px-5 py-4 whitespace-nowrap text-xs text-muted">{fmt(tk.created_at)}</td>
+                      <td className="px-5 py-4 whitespace-nowrap">
+                        <div className="flex justify-end gap-1.5">
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            className="h-7 px-2.5 text-xs"
+                            onClick={() => void updateSupportTicket(tk.id, { status: tk.status === "resolved" ? "open" : "resolved" })}
+                            disabled={manualLoading === tk.id}
+                          >
+                            {tk.status === "resolved" ? "Reopen" : "Resolve"}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            className="h-7 px-2.5 text-xs"
+                            onClick={() => void updateSupportTicket(tk.id, { priority: tk.priority === "high" ? "medium" : "high", status: tk.status === "resolved" ? "in_review" : tk.status })}
+                            disabled={manualLoading === tk.id}
+                          >
+                            {tk.priority === "high" ? "Lower" : "Escalate"}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="danger"
+                            className="h-7 px-2.5 text-xs"
+                            onClick={() => void deleteSupportTicket(tk.id)}
+                            disabled={manualLoading === tk.id}
+                          >
+                            Delete
+                          </Button>
+                        </div>
                       </td>
-                      <td className="px-4 py-2.5 text-muted">{tk.customer_identifier ?? "—"}</td>
-                      <td className="px-4 py-2.5 text-muted">{fmt(tk.created_at)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
           </Card>
+          </>
         )}
 
         {/* ── COMPLIANCE ── */}
         {activeTab === "compliance" && (
+          <>
+          <Card className="mb-3 p-5">
+            <form className="grid gap-3 lg:grid-cols-12" onSubmit={createComplianceRecord}>
+              <div className="lg:col-span-5">
+                <p className="mb-1 text-xs text-muted">Description</p>
+                <Input value={complianceForm.description} onChange={e => setComplianceForm(f => ({ ...f, description: e.target.value }))} required placeholder="Missing receipt for reimbursement" />
+              </div>
+              <div className="lg:col-span-2">
+                <p className="mb-1 text-xs text-muted">Type</p>
+                <Input value={complianceForm.record_type} onChange={e => setComplianceForm(f => ({ ...f, record_type: e.target.value }))} placeholder="expense_policy" />
+              </div>
+              <div className="lg:col-span-2">
+                <p className="mb-1 text-xs text-muted">Severity</p>
+                <select value={complianceForm.severity} onChange={e => setComplianceForm(f => ({ ...f, severity: e.target.value as ComplianceForm["severity"] }))} className="h-10 w-full rounded-md border border-border/10 bg-surface-elevated/40 px-3 py-2 text-sm">
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                </select>
+              </div>
+              <label className="flex items-end gap-2 pb-2 text-sm lg:col-span-2">
+                <input type="checkbox" checked={complianceForm.policy_flag} onChange={e => setComplianceForm(f => ({ ...f, policy_flag: e.target.checked }))} />
+                Policy flag
+              </label>
+              <div className="flex items-end lg:col-span-1">
+                <Button type="submit" className="w-full" disabled={manualLoading === "create-compliance"}>
+                  {manualLoading === "create-compliance" ? "Adding..." : "Add"}
+                </Button>
+              </div>
+              <div className="lg:col-span-12">
+                <Input value={complianceForm.recommendation} onChange={e => setComplianceForm(f => ({ ...f, recommendation: e.target.value }))} placeholder="Optional recommendation" />
+              </div>
+            </form>
+          </Card>
           <Card className="overflow-hidden p-0">
             {/* Filter bar */}
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border/10 bg-surface-elevated/30 px-5 py-3">
+              <input
+                type="search"
+                value={crSearch}
+                onChange={e => setCrSearch(e.target.value)}
+                placeholder="Search compliance..."
+                className="h-7 w-48 rounded border border-border/20 bg-surface-elevated px-2.5 text-xs text-foreground placeholder:text-muted outline-none focus:border-accent/40"
+              />
               <FilterPills
                 label="Status"
                 value={crF.status}
@@ -645,8 +1021,8 @@ export default function HomePage() {
               />
               <div className="ml-auto flex items-center gap-3">
                 <ActiveCount shown={visibleCr.length} total={compliance.length} />
-                {anyCrActive && (
-                  <button onClick={resetCrF} className="text-xs text-accent-foreground hover:underline">
+                {(anyCrActive || crSearch) && (
+                  <button onClick={() => { resetCrF(); setCrSearch(""); }} className="text-xs text-accent-foreground hover:underline">
                     Clear filters
                   </button>
                 )}
@@ -656,45 +1032,76 @@ export default function HomePage() {
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-border/10 text-xs text-muted">
-                    <th className="px-5 py-2.5 text-left">Description</th>
-                    <th className="px-4 py-2.5 text-left">Type</th>
-                    <th className="px-4 py-2.5 text-left">Status</th>
-                    <th className="px-4 py-2.5 text-center">Flag</th>
-                    <th className="px-4 py-2.5 text-left">Severity</th>
-                    <th className="px-4 py-2.5 text-left">Created</th>
+                  <tr className="border-b border-border/10">
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Description</th>
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Type</th>
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Status</th>
+                    <th className="px-5 py-4 text-center text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Flag</th>
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Severity</th>
+                    <th className="px-5 py-4 text-left text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Created</th>
+                    <th className="px-5 py-4 text-right text-xs font-medium uppercase tracking-wide text-muted whitespace-nowrap">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {visibleCr.length === 0 && (
-                    <tr><td colSpan={6} className="px-5 py-8 text-center text-muted">No records match these filters.</td></tr>
+                    <tr><td colSpan={7} className="px-5 py-10 text-center text-sm text-muted">No records match these filters.</td></tr>
                   )}
                   {visibleCr.map(cr => (
                     <tr key={cr.id} className="border-b border-border/5 hover:bg-surface-elevated/30">
-                      <td className="max-w-xs px-5 py-2.5">
-                        <p className="truncate font-medium">{cr.description}</p>
-                      </td>
-                      <td className="px-4 py-2.5 text-muted">{fmtCat(cr.record_type)}</td>
-                      <td className="px-4 py-2.5">
+                      <td className="px-5 py-4 font-medium">{cr.description}</td>
+                      <td className="px-5 py-4 whitespace-nowrap text-muted">{fmtCat(cr.record_type)}</td>
+                      <td className="px-5 py-4 whitespace-nowrap">
                         <span className={
-                          cr.status === "pending"  ? "font-medium text-yellow-400" :
-                          cr.status === "rejected" ? "font-medium text-red-400"    :
-                          "font-medium text-success"
+                          cr.status === "pending"  ? "text-xs font-semibold text-yellow-400" :
+                          cr.status === "rejected" ? "text-xs font-semibold text-red-400"    :
+                          "text-xs font-semibold text-success"
                         }>{fmtCat(cr.status)}</span>
                       </td>
-                      <td className="px-4 py-2.5 text-center">
+                      <td className="px-5 py-4 whitespace-nowrap text-center">
                         {cr.policy_flag ? <span className="text-red-400">⚑</span> : <span className="text-muted">—</span>}
                       </td>
-                      <td className="px-4 py-2.5">
-                        <span className={severityColor(cr.severity)}>{cr.severity ?? "—"}</span>
+                      <td className="px-5 py-4 whitespace-nowrap">
+                        <span className={`text-xs font-semibold ${severityColor(cr.severity)}`}>{cr.severity ?? "—"}</span>
                       </td>
-                      <td className="px-4 py-2.5 text-muted">{fmt(cr.created_at)}</td>
+                      <td className="px-5 py-4 whitespace-nowrap text-xs text-muted">{fmt(cr.created_at)}</td>
+                      <td className="px-5 py-4 whitespace-nowrap">
+                        <div className="flex justify-end gap-1.5">
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            className="h-7 px-2.5 text-xs"
+                            onClick={() => void updateComplianceRecord(cr.id, { policy_flag: !cr.policy_flag, severity: cr.policy_flag ? cr.severity : "medium" })}
+                            disabled={manualLoading === cr.id}
+                          >
+                            {cr.policy_flag ? "Unflag" : "Flag"}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            className="h-7 px-2.5 text-xs"
+                            onClick={() => void updateComplianceRecord(cr.id, { status: cr.status === "approved" ? "pending" : "approved" })}
+                            disabled={manualLoading === cr.id}
+                          >
+                            {cr.status === "approved" ? "Reopen" : "Approve"}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="danger"
+                            className="h-7 px-2.5 text-xs"
+                            onClick={() => void deleteComplianceRecord(cr.id)}
+                            disabled={manualLoading === cr.id}
+                          >
+                            Delete
+                          </Button>
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
           </Card>
+          </>
         )}
       </div>
 

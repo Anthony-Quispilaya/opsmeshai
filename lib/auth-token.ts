@@ -14,7 +14,7 @@ export function clearStoredToken(): void {
 }
 
 export function apiBaseUrl(): string {
-  return process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  return process.env.NEXT_PUBLIC_API_URL || "http://localhost:8002";
 }
 
 export function authHeaders(token: string | null): HeadersInit | undefined {

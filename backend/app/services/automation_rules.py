@@ -74,9 +74,11 @@ class AutomationRuleService:
         if not rules:
             rules = await self.seed_defaults(db)
 
-        created = await self.agent_actions.generate_recommendations(db)
+        created: list = []
         now = datetime.now(timezone.utc)
         for rule in rules:
+            actions = await self.agent_actions.run_rule(db, rule)
+            created.extend(actions)
             rule.last_run_at = now
 
         db.add(

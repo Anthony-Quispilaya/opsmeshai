@@ -1,6 +1,7 @@
 import asyncio
 from collections import Counter
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc, func, select
@@ -21,11 +22,17 @@ from backend.app.schemas.ops import (
     AuditLogResponse,
     AutomationRunResponse,
     AutomationRuleResponse,
+    ComplianceRecordCreateRequest,
     DailyBriefingResponse,
+    ComplianceRecordUpdateRequest,
     ComplianceRecordResponse,
     InsightsResponse,
     RejectAgentActionRequest,
+    SupportTicketCreateRequest,
+    SupportTicketUpdateRequest,
     SupportTicketResponse,
+    TransactionCreateRequest,
+    TransactionUpdateRequest,
     TransactionResponse,
 )
 from backend.app.services.agent_actions import AgentActionService
@@ -35,6 +42,47 @@ router = APIRouter(prefix="/ops", tags=["ops"])
 _llm = LLMResponder()
 _actions = AgentActionService()
 _automation = AutomationRuleService()
+
+
+def _risk_from_transaction(amount: float, category: str, flagged: bool) -> int:
+    risk = 15
+    if amount >= 2000:
+        risk += 55
+    elif amount >= 500:
+        risk += 30
+    elif amount >= 150:
+        risk += 12
+    if category.lower() in {"travel", "electronics", "luxury", "cash", "crypto"}:
+        risk += 15
+    if flagged:
+        risk = max(risk, 65)
+    return min(100, risk)
+
+
+def _clean(value: str | None, fallback: str) -> str:
+    value = (value or "").strip()
+    return value or fallback
+
+
+async def _audit(
+    db: AsyncSession,
+    event_type: str,
+    domain: str,
+    action_taken: str,
+    entity_id: str | None,
+) -> None:
+    db.add(
+        AuditLog(
+            id=str(uuid4()),
+            event_type=event_type,
+            domain=domain,
+            action_taken=action_taken,
+            reasoning="Manual dashboard action",
+            source="dashboard",
+            related_entity_id=entity_id,
+        )
+    )
+    await db.flush()
 
 
 @router.get("/transactions", response_model=list[TransactionResponse])
@@ -51,6 +99,83 @@ async def list_transactions(
     return result.scalars().all()  # type: ignore[return-value]
 
 
+@router.post("/transactions", response_model=TransactionResponse)
+async def create_transaction(
+    payload: TransactionCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> TransactionResponse:
+    category = _clean(payload.category, "retail")
+    risk_score = payload.risk_score
+    if risk_score is None:
+        risk_score = _risk_from_transaction(payload.amount, category, payload.flagged)
+    tx = Transaction(
+        id=str(uuid4()),
+        amount=payload.amount,
+        merchant=_clean(payload.merchant, "Unknown"),
+        item_name=_clean(payload.item_name, "") or None,
+        location=_clean(payload.location, "Unknown"),
+        category=category,
+        risk_score=risk_score,
+        flagged=payload.flagged or risk_score >= 71,
+        notes=payload.notes,
+        source="dashboard",
+    )
+    db.add(tx)
+    await _audit(
+        db,
+        "transaction_added",
+        "transactions",
+        f"Added dashboard transaction: ${tx.amount:.2f} at {tx.merchant}",
+        tx.id,
+    )
+    await db.commit()
+    await db.refresh(tx)
+    return tx  # type: ignore[return-value]
+
+
+@router.patch("/transactions/{transaction_id}", response_model=TransactionResponse)
+async def update_transaction(
+    transaction_id: str,
+    payload: TransactionUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> TransactionResponse:
+    tx = await db.get(Transaction, transaction_id)
+    if tx is None:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    updates = payload.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        if isinstance(value, str):
+            value = value.strip()
+        setattr(tx, field, value)
+    await _audit(
+        db,
+        "transaction_updated",
+        "transactions",
+        f"Updated dashboard transaction: ${tx.amount:.2f} at {tx.merchant}",
+        tx.id,
+    )
+    await db.commit()
+    await db.refresh(tx)
+    return tx  # type: ignore[return-value]
+
+
+@router.delete("/transactions/{transaction_id}", status_code=204)
+async def delete_transaction(
+    transaction_id: str,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> None:
+    tx = await db.get(Transaction, transaction_id)
+    if tx is None:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    description = f"${tx.amount:.2f} at {tx.merchant}"
+    await db.delete(tx)
+    await _audit(db, "transaction_deleted", "transactions", f"Deleted dashboard transaction: {description}", None)
+    await db.commit()
+
+
 @router.get("/support-tickets", response_model=list[SupportTicketResponse])
 async def list_support_tickets(
     limit: int = Query(default=50, le=200),
@@ -65,6 +190,76 @@ async def list_support_tickets(
     return result.scalars().all()  # type: ignore[return-value]
 
 
+@router.post("/support-tickets", response_model=SupportTicketResponse)
+async def create_support_ticket(
+    payload: SupportTicketCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> SupportTicketResponse:
+    ticket = SupportTicket(
+        id=str(uuid4()),
+        customer_identifier=payload.customer_identifier,
+        description=payload.description.strip(),
+        category=_clean(payload.category, "general"),
+        status=payload.status,
+        priority=payload.priority,
+        source="dashboard",
+    )
+    db.add(ticket)
+    await _audit(
+        db,
+        "support_ticket_created",
+        "support",
+        f"Created dashboard support ticket: {ticket.category}",
+        ticket.id,
+    )
+    await db.commit()
+    await db.refresh(ticket)
+    return ticket  # type: ignore[return-value]
+
+
+@router.patch("/support-tickets/{ticket_id}", response_model=SupportTicketResponse)
+async def update_support_ticket(
+    ticket_id: str,
+    payload: SupportTicketUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> SupportTicketResponse:
+    ticket = await db.get(SupportTicket, ticket_id)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail="Support ticket not found")
+    updates = payload.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        if isinstance(value, str):
+            value = value.strip()
+        setattr(ticket, field, value)
+    await _audit(
+        db,
+        "support_ticket_updated",
+        "support",
+        f"Updated dashboard support ticket: {ticket.category}",
+        ticket.id,
+    )
+    await db.commit()
+    await db.refresh(ticket)
+    return ticket  # type: ignore[return-value]
+
+
+@router.delete("/support-tickets/{ticket_id}", status_code=204)
+async def delete_support_ticket(
+    ticket_id: str,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> None:
+    ticket = await db.get(SupportTicket, ticket_id)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail="Support ticket not found")
+    category = ticket.category
+    await db.delete(ticket)
+    await _audit(db, "support_ticket_deleted", "support", f"Deleted dashboard support ticket: {category}", None)
+    await db.commit()
+
+
 @router.get("/compliance", response_model=list[ComplianceRecordResponse])
 async def list_compliance(
     limit: int = Query(default=50, le=200),
@@ -77,6 +272,77 @@ async def list_compliance(
         q = q.where(ComplianceRecord.status == status)
     result = await db.execute(q)
     return result.scalars().all()  # type: ignore[return-value]
+
+
+@router.post("/compliance", response_model=ComplianceRecordResponse)
+async def create_compliance_record(
+    payload: ComplianceRecordCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> ComplianceRecordResponse:
+    record = ComplianceRecord(
+        id=str(uuid4()),
+        record_type=_clean(payload.record_type, "general"),
+        description=payload.description.strip(),
+        status=payload.status,
+        policy_flag=payload.policy_flag,
+        severity=payload.severity,
+        recommendation=payload.recommendation,
+        source="dashboard",
+    )
+    db.add(record)
+    await _audit(
+        db,
+        "compliance_record_added",
+        "compliance",
+        f"Added dashboard compliance record: {record.record_type}",
+        record.id,
+    )
+    await db.commit()
+    await db.refresh(record)
+    return record  # type: ignore[return-value]
+
+
+@router.patch("/compliance/{record_id}", response_model=ComplianceRecordResponse)
+async def update_compliance_record(
+    record_id: str,
+    payload: ComplianceRecordUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> ComplianceRecordResponse:
+    record = await db.get(ComplianceRecord, record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Compliance record not found")
+    updates = payload.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        if isinstance(value, str):
+            value = value.strip()
+        setattr(record, field, value)
+    await _audit(
+        db,
+        "compliance_record_updated",
+        "compliance",
+        f"Updated dashboard compliance record: {record.record_type}",
+        record.id,
+    )
+    await db.commit()
+    await db.refresh(record)
+    return record  # type: ignore[return-value]
+
+
+@router.delete("/compliance/{record_id}", status_code=204)
+async def delete_compliance_record(
+    record_id: str,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> None:
+    record = await db.get(ComplianceRecord, record_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Compliance record not found")
+    record_type = record.record_type
+    await db.delete(record)
+    await _audit(db, "compliance_record_deleted", "compliance", f"Deleted dashboard compliance record: {record_type}", None)
+    await db.commit()
 
 
 @router.get("/audit-logs", response_model=list[AuditLogResponse])
@@ -194,27 +460,60 @@ async def get_daily_briefing(
     pending_compliance = int(
         await db.scalar(select(func.count(ComplianceRecord.id)).where(ComplianceRecord.status == "pending")) or 0
     )
-    pending_actions = list(
+    # Pull live data for next actions — never read from the stale agent_actions table
+    top_flagged = list(
         (
             await db.execute(
-                select(AgentAction)
-                .where(AgentAction.status == "pending")
-                .order_by(desc(AgentAction.priority), desc(AgentAction.created_at))
-                .limit(3)
+                select(Transaction)
+                .where(Transaction.flagged.is_(True))
+                .order_by(desc(Transaction.risk_score))
+                .limit(2)
             )
-        )
-        .scalars()
-        .all()
+        ).scalars().all()
+    )
+    urgent_tickets = list(
+        (
+            await db.execute(
+                select(SupportTicket)
+                .where(SupportTicket.status == "open", SupportTicket.priority == "high")
+                .order_by(desc(SupportTicket.created_at))
+                .limit(1)
+            )
+        ).scalars().all()
+    )
+    flagged_compliance = list(
+        (
+            await db.execute(
+                select(ComplianceRecord)
+                .where(ComplianceRecord.status == "pending", ComplianceRecord.policy_flag.is_(True))
+                .order_by(desc(ComplianceRecord.created_at))
+                .limit(1)
+            )
+        ).scalars().all()
     )
 
-    highlights = [
-        f"{flagged_count} flagged transactions, including {high_risk_count} high-risk items.",
-        f"{open_tickets} open support tickets need queue coverage.",
-        f"{pending_compliance} compliance records are pending review.",
-    ]
-    recommended_actions = [action.title for action in pending_actions]
+    recommended_actions: list[str] = []
+    for tx in top_flagged:
+        label = f"{tx.merchant}" + (f" — {tx.item_name}" if tx.item_name else "")
+        recommended_actions.append(f"Review flagged transaction: {label} (risk {tx.risk_score}/100)")
+    for tk in urgent_tickets:
+        snippet = tk.description[:60] + ("…" if len(tk.description) > 60 else "")
+        recommended_actions.append(f"Escalate urgent ticket: {snippet}")
+    for cr in flagged_compliance:
+        recommended_actions.append(f"Resolve policy-flagged {cr.record_type.replace('_', ' ')} compliance item")
     if not recommended_actions:
-        recommended_actions = ["Run automation rules to generate approval-ready next steps."]
+        if open_tickets > 0:
+            recommended_actions.append(f"Review {open_tickets} open support ticket{'s' if open_tickets != 1 else ''}")
+        if pending_compliance > 0:
+            recommended_actions.append(f"Review {pending_compliance} pending compliance item{'s' if pending_compliance != 1 else ''}")
+        if not recommended_actions:
+            recommended_actions.append("No urgent actions — all queues are clear")
+
+    highlights = [
+        f"{flagged_count} flagged transaction{'s' if flagged_count != 1 else ''}, including {high_risk_count} high-risk item{'s' if high_risk_count != 1 else ''}.",
+        f"{open_tickets} open support ticket{'s' if open_tickets != 1 else ''} need{'s' if open_tickets == 1 else ''} queue coverage.",
+        f"{pending_compliance} compliance record{'s' if pending_compliance != 1 else ''} pending review.",
+    ]
 
     summary = (
         f"Today: {flagged_count} flagged transactions, {open_tickets} open tickets, "

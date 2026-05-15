@@ -17,10 +17,10 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="flex w-full flex-col gap-6 lg:w-56 lg:shrink-0">
+    <aside className="flex w-full flex-col gap-3 lg:w-48 lg:shrink-0">
       <div className="px-1">
         <Link
-          href="/"
+          href="/dashboard"
           className="flex items-center gap-2 rounded-md px-2 py-1 text-sm font-semibold tracking-tight text-foreground focus-visible:shadow-focus"
         >
           <span
@@ -36,7 +36,7 @@ export function Sidebar() {
       <nav aria-label="Primary" className="flex flex-col gap-1">
         {primaryNav.map((item) => {
           const active =
-            item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+            item.href === "/dashboard" ? pathname === "/dashboard" : pathname.startsWith(item.href);
 
           return (
             <Link

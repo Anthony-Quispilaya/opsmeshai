@@ -34,7 +34,7 @@ export default function RegisterPage() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (getStoredToken()) router.replace("/");
+    if (getStoredToken()) router.replace("/dashboard");
   }, [router]);
 
   async function onSubmit(e: FormEvent) {
@@ -60,7 +60,7 @@ export default function RegisterPage() {
       }
       const data = (await res.json()) as RegisterResponse;
       setStoredToken(data.access_token);
-      router.replace("/");
+      router.replace("/dashboard");
     } catch {
       setError(`Cannot reach the API at ${apiUrl}. Is the backend running?`);
     } finally {

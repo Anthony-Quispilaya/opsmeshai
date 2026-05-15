@@ -8,18 +8,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.agent_action import AgentAction
 from backend.app.models.audit_log import AuditLog
+from backend.app.models.automation_rule import AutomationRule
 from backend.app.models.compliance_record import ComplianceRecord
 from backend.app.models.support_ticket import SupportTicket
 from backend.app.models.transaction import Transaction
 
+_DEFAULT_TX_CONDITIONS: dict = {"flagged": True}
+_DEFAULT_SUPPORT_CONDITIONS: dict = {"status": "open", "priority": "high"}
+_DEFAULT_COMPLIANCE_CONDITIONS: dict = {"status": "pending", "policy_flag": True}
+
 
 class AgentActionService:
     async def generate_recommendations(self, db: AsyncSession) -> list[AgentAction]:
+        """Used by the /generate endpoint — applies the default hardcoded conditions."""
         created: list[AgentAction] = []
-        created.extend(await self._recommend_transaction_reviews(db))
-        created.extend(await self._recommend_support_escalations(db))
-        created.extend(await self._recommend_compliance_reviews(db))
+        created.extend(await self._recommend_transaction_reviews(db, _DEFAULT_TX_CONDITIONS))
+        created.extend(await self._recommend_support_escalations(db, _DEFAULT_SUPPORT_CONDITIONS))
+        created.extend(await self._recommend_compliance_reviews(db, _DEFAULT_COMPLIANCE_CONDITIONS))
         return created
+
+    async def run_rule(self, db: AsyncSession, rule: AutomationRule) -> list[AgentAction]:
+        """Evaluate a single automation rule using its stored conditions."""
+        conditions: dict = rule.conditions or {}
+        if rule.domain == "transactions":
+            return await self._recommend_transaction_reviews(db, conditions)
+        if rule.domain == "support":
+            return await self._recommend_support_escalations(db, conditions)
+        if rule.domain == "compliance":
+            return await self._recommend_compliance_reviews(db, conditions)
+        return []
 
     async def approve(self, db: AsyncSession, action: AgentAction) -> AgentAction:
         if action.status != "pending":
@@ -68,15 +85,25 @@ class AgentActionService:
         await db.flush()
         return action
 
-    async def _recommend_transaction_reviews(self, db: AsyncSession) -> list[AgentAction]:
-        rows = (
-            await db.execute(
-                select(Transaction)
-                .where(Transaction.flagged.is_(True))
-                .order_by(desc(Transaction.risk_score), desc(Transaction.created_at))
-                .limit(3)
-            )
-        ).scalars().all()
+    # ── Per-domain recommendation methods ────────────────────────────────────────
+
+    async def _recommend_transaction_reviews(
+        self, db: AsyncSession, conditions: dict
+    ) -> list[AgentAction]:
+        q = select(Transaction)
+        if conditions.get("flagged"):
+            q = q.where(Transaction.flagged.is_(True))
+        if "risk_score_gte" in conditions:
+            q = q.where(Transaction.risk_score >= int(conditions["risk_score_gte"]))
+        if "risk_score_lte" in conditions:
+            q = q.where(Transaction.risk_score <= int(conditions["risk_score_lte"]))
+        if "category" in conditions:
+            q = q.where(Transaction.category == conditions["category"])
+        if "source" in conditions:
+            q = q.where(Transaction.source == conditions["source"])
+        q = q.order_by(desc(Transaction.risk_score), desc(Transaction.created_at)).limit(3)
+
+        rows = (await db.execute(q)).scalars().all()
         actions: list[AgentAction] = []
         for tx in rows:
             action = await self._create_once(
@@ -96,15 +123,19 @@ class AgentActionService:
                 actions.append(action)
         return actions
 
-    async def _recommend_support_escalations(self, db: AsyncSession) -> list[AgentAction]:
-        rows = (
-            await db.execute(
-                select(SupportTicket)
-                .where(SupportTicket.status == "open", SupportTicket.priority == "high")
-                .order_by(desc(SupportTicket.created_at))
-                .limit(3)
-            )
-        ).scalars().all()
+    async def _recommend_support_escalations(
+        self, db: AsyncSession, conditions: dict
+    ) -> list[AgentAction]:
+        q = select(SupportTicket)
+        if "status" in conditions:
+            q = q.where(SupportTicket.status == conditions["status"])
+        if "priority" in conditions:
+            q = q.where(SupportTicket.priority == conditions["priority"])
+        if "category" in conditions:
+            q = q.where(SupportTicket.category == conditions["category"])
+        q = q.order_by(desc(SupportTicket.created_at)).limit(3)
+
+        rows = (await db.execute(q)).scalars().all()
         actions: list[AgentAction] = []
         for ticket in rows:
             action = await self._create_once(
@@ -124,15 +155,19 @@ class AgentActionService:
                 actions.append(action)
         return actions
 
-    async def _recommend_compliance_reviews(self, db: AsyncSession) -> list[AgentAction]:
-        rows = (
-            await db.execute(
-                select(ComplianceRecord)
-                .where(ComplianceRecord.status == "pending", ComplianceRecord.policy_flag.is_(True))
-                .order_by(desc(ComplianceRecord.created_at))
-                .limit(3)
-            )
-        ).scalars().all()
+    async def _recommend_compliance_reviews(
+        self, db: AsyncSession, conditions: dict
+    ) -> list[AgentAction]:
+        q = select(ComplianceRecord)
+        if "status" in conditions:
+            q = q.where(ComplianceRecord.status == conditions["status"])
+        if conditions.get("policy_flag"):
+            q = q.where(ComplianceRecord.policy_flag.is_(True))
+        if "severity" in conditions:
+            q = q.where(ComplianceRecord.severity == conditions["severity"])
+        q = q.order_by(desc(ComplianceRecord.created_at)).limit(3)
+
+        rows = (await db.execute(q)).scalars().all()
         actions: list[AgentAction] = []
         for record in rows:
             action = await self._create_once(
@@ -156,6 +191,8 @@ class AgentActionService:
             if action:
                 actions.append(action)
         return actions
+
+    # ── Helpers ───────────────────────────────────────────────────────────────────
 
     async def _create_once(
         self,
